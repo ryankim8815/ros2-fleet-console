@@ -54,9 +54,9 @@ window.App.ready.then((App) => {
   // 저장은 관리자 토큰 필요 (PC 의 ros2-fleet-console/config/admin_token). 한 번 입력하면 이 브라우저에 기억
   async function putFleet(retry) {
     const token = App.store.get('tb3.adminToken', '');
-    const r = await fetch('/api/fleet', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ mapTopic, robots: list }) });
+    const r = await fetch('/api/fleet', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token }, body: JSON.stringify({ mapTopic, robots: list, ...(App.fleet.mapFile ? { mapFile: App.fleet.mapFile } : {}) }) });
     if (r.status === 401 && retry) {
-      const t = prompt('관리자 토큰을 입력하세요.\nPC 에서: cat ~/turtlebot3/app/config/admin_token', '');
+      const t = prompt('관리자 토큰을 입력하세요.\nPC 에서: cat ~/turtlebot3/ros2-fleet-console/config/admin_token', '');
       if (!t) throw new Error('토큰이 없어 저장하지 않았습니다');
       App.store.set('tb3.adminToken', t.trim());
       return putFleet(false);

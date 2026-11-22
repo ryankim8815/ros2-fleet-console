@@ -111,7 +111,7 @@ PC 와 로봇 모두 **ROS 2 Jazzy** 입니다 (TurtleBot3: Ubuntu 24.04 + apt, 
 
 ```bash
 # PC 에서 한 번만: 래퍼를 로봇으로 복사
-scp ~/turtlebot3/app/robot/tb3_ns.launch.py <사용자>@<TurtleBot3 IP>:~/
+scp ~/turtlebot3/ros2-fleet-console/robot/tb3_ns.launch.py <사용자>@<TurtleBot3 IP>:~/
 
 # TurtleBot3 (Raspberry Pi) 에서 — Nav2 와 함께 (TF 가 /tb3_01/tf 로)
 ros2 launch ~/tb3_ns.launch.py namespace:=tb3_01
@@ -187,7 +187,7 @@ PC 에서 Pinky 로 파일을 복사합니다. 사용자 이름과 IP 는 실제
 
 ```bash
 # PC 에서
-scp ~/turtlebot3/app/robot/pinky_ns.launch.py <사용자>@<Pinky IP>:~/
+scp ~/turtlebot3/ros2-fleet-console/robot/pinky_ns.launch.py <사용자>@<Pinky IP>:~/
 ```
 
 Pinky 에는 `pinky_bringup`, `pinky_led`, `pinky_emotion` 패키지가 빌드·source 되어 있어야 합니다 (Pinklab 기본 설치). 확인:
@@ -368,13 +368,13 @@ Jazzy `nav2_bringup` 은 네임스페이스 모드에서 Nav2 노드의 `/tf` �
 ros2 launch ~/tb3_ns.launch.py namespace:=tb3_01          # TurtleBot3 에서
 ros2 launch ~/pinky_ns.launch.py namespace:=pinky_01      # Pinky 에서
 
-# 2) PC: 로봇마다 Nav2 (같은 지도 파일)
+# 2) PC: 웹 (지도가 없으면 웹의 '지도 작성'으로 먼저 만들기 — 7-4)
 cd ~/turtlebot3
-pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=tb3_01 frame_prefix:=tb3_01/ map:=$HOME/map.yaml
-pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky_01 stamped:=false map:=$HOME/map.yaml
-
-# 3) PC: 웹
 pixi run web
+
+# 3) PC: 로봇마다 Nav2 (같은 지도, 이름 lab = config/maps/lab.yaml)
+pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=tb3_01 frame_prefix:=tb3_01/ map:=lab
+pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky_01 stamped:=false map:=lab
 ```
 
 | 인자 | 기본값 | 설명 |
@@ -382,8 +382,9 @@ pixi run web
 | `namespace` | (필수) | 로봇 네임스페이스 (`tb3_01`) |
 | `frame_prefix` | `''` | TF 프레임 접두사. TurtleBot3 는 `tb3_01/`, Pinky 는 비움 |
 | `stamped` | `true` | cmd_vel TwistStamped 여부. Pinky 는 `false` |
-| `map` | (필수) | 지도 yaml |
-| `params_file` | burger.yaml | 다른 Nav2 파라미터를 쓰려면 지정 (같은 방식으로 고쳐짐) |
+| `map` | (필수) | 지도 이름(`config/maps/<이름>.yaml`) 또는 yaml 경로 |
+| `keepout` | `auto` | 이동 구역 마스크. `auto` 면 `config/masks/<지도>/<ns>.yaml` 이 있을 때 keepout 필터를 켬, `off` 로 끔, 또는 yaml 경로 |
+| `params_file` | `config/nav2/burger.yaml` | 다른 Nav2 파라미터를 쓰려면 지정 (같은 방식으로 고쳐짐) |
 
 4) 웹 등록:
 - TF 토픽은 TurtleBot3 `/tb3_01/tf`, Pinky `/pinky_01/tf` 입니다.
@@ -394,6 +395,29 @@ pixi run web
 - 그다음 **목표 지정**을 누르고 지도에서 목표를 찍습니다.
 
 Pinky 의 로봇 크기·속도에 맞는 Nav2 파라미터는 아직 따로 만들지 않았습니다 (burger.yaml 을 그대로 씀). 실제 Pinky 에서 `robot_radius`, 최대 속도 등을 맞추는 것을 권합니다.
+
+### 7-4. 지도 작성 (처음 한 번, 로봇 한 대)
+
+웹의 **지도 작성** 화면이 PC 에서 [`mapping_ns.launch.py`](mapping_ns.launch.py) (slam_toolbox, 그 로봇의 네임스페이스) 를 실행합니다.
+로봇은 위처럼 네임스페이스 bringup 만 되어 있으면 됩니다 (Nav2 는 지도 작성 중에 띄우지 않음).
+
+- 지도는 `/<ns>/map` 으로 나오고, map → `<접두사>odom` TF 는 그 로봇의 TF 토픽으로 나갑니다.
+- 저장하면 `config/maps/<이름>.yaml|pgm` 이 생기고, 활성 지도로 지정할 수 있습니다.
+- 직접 실행: `pixi run ros2 launch ros2-fleet-console/robot/mapping_ns.launch.py namespace:=tb3_01 frame_prefix:=tb3_01/ tf_topic:=/tb3_01/tf`
+
+### 7-5. 이동 구역 (Nav2 keepout)
+
+웹의 **이동 구역** 화면에서 구역을 저장하면 로봇마다 `config/masks/<지도>/<ns>.yaml|pgm` 마스크가 생기고, `nav2_ns.launch.py` 가 이를 찾아 다음을 함께 띄웁니다.
+
+| 노드 (`/<ns>/…`) | 역할 |
+| --- | --- |
+| `keepout_filter_mask_server` | 마스크 지도 발행 (`/<ns>/keepout_filter_mask`) |
+| `keepout_costmap_filter_info_server` | 필터 정보 발행 (`/<ns>/keepout_costmap_filter_info`) |
+| `lifecycle_manager_keepout` | 위 둘 활성화 |
+| global/local costmap 의 `keepout_filter` | 마스크를 비용지도에 반영 |
+
+- 마스크 = 구역 안 통과 불가 + 로봇 반지름 이내 매우 높은 비용 + 그 밖 0.35 m 까지 점점 낮아지는 비용. KeepoutFilter 는 금지 셀 주변을 부풀리지 않아, 금지 셀만 넣으면 경로가 경계에 붙고 제어기가 "모든 궤적 충돌"로 멈추기 때문입니다.
+- 구역을 다시 저장하면 웹이 `/<ns>/keepout_filter_mask_server/load_map` 을 불러 실행 중인 Nav2 에 바로 반영합니다.
 
 ---
 

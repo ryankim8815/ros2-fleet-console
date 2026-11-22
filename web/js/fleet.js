@@ -99,6 +99,26 @@ window.App.ready.then((App) => {
     }
     view.invalidate();
   }
+  // ---- 이동 구역 표시 (활성 지도의 구역, 선택한 로봇에 해당하지 않는 구역은 흐리게) ----
+  function updateZones() {
+    view.state.zones = (App.zones.zones || []).map((z) => ({ ...z, label: z.name, dim: !(z.robots.includes('*') || z.robots.includes(sel.id)) }));
+  }
+  setInterval(updateZones, 1000);
+
+  // ---- 지도가 없을 때 (처음 시작) 안내 ----
+  (async () => {
+    let maps = [];
+    try { maps = await (await fetch('/api/maps', { cache: 'no-store' })).json(); } catch (e) { return; }
+    const b = $('#map-banner');
+    if (!maps.length) {
+      b.innerHTML = '<b>아직 지도가 없습니다.</b><span class="muted">로봇 한 대로 먼저 지도를 그리면 이동 구역과 여러 대의 Nav2 에 같은 지도를 씁니다.</span><a class="btn btn-primary" href="mapping.html" style="text-decoration: none">지도 작성 시작</a>';
+      b.classList.remove('hidden');
+    } else if (!App.fleet.mapFile) {
+      b.innerHTML = `<b>활성 지도가 정해지지 않았습니다.</b><span class="muted">저장된 지도 ${maps.length}개 중 하나를 활성 지도로 지정하세요.</span><a class="btn" href="zones.html" style="text-decoration: none">지도 고르기</a>`;
+      b.classList.remove('hidden');
+    }
+  })();
+
   const MIN_DIST_WARN = 0.5;   // m
   let minDistWarned = false;
   setInterval(updateView, 100);

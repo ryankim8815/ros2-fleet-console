@@ -94,6 +94,11 @@
         this.invalidate();
       });
       cv.addEventListener('pointermove', (e) => {
+        if (this.onPointClick) {   // 다각형 그리기 중: 커서 위치 표시
+          const [cx, cy] = pos(e);
+          this.state.cursor = this.toWorld(cx, cy);
+          this.invalidate();
+        }
         if (!drag) return;
         const [px, py] = pos(e);
         if (drag.goal) {
@@ -110,11 +115,15 @@
         }
         this.invalidate();
       });
-      const end = () => {
+      const end = (e) => {
         if (drag && drag.goal && this.state.draft) {
           const g = this.state.draft;
           this.state.draft = null;
           if (this.onGoal) this.onGoal(g.x, g.y, g.th);
+        } else if (drag && !drag.goal && !drag.moved && this.onPointClick) {
+          // 끌지 않은 클릭 = 점 찍기 (구역 편집)
+          const [px, py] = pos(e);
+          this.onPointClick(...this.toWorld(px, py), e);
         }
         drag = null;
         this.invalidate();
@@ -126,6 +135,19 @@
         const [px, py] = pos(e);
         this.zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, px, py);
       }, { passive: false });
+    }
+
+    // 저장된 지도 PNG(위쪽 = 최대 y) -> 지도 레이어. info: {resolution, origin:[x,y,th]}
+    static async mapFromPng(url, info) {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      const g = c.getContext('2d');
+      g.translate(0, img.height); g.scale(1, -1);    // OccupancyGrid 와 같게 행 0 = 아래쪽
+      g.drawImage(img, 0, 0);
+      return { canvas: c, x: info.origin[0], y: info.origin[1], th: info.origin[2] || 0, res: info.resolution };
     }
 
     // OccupancyGrid -> 오프스크린 캔버스
@@ -197,6 +219,45 @@
         ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []); ctx.stroke(); ctx.setLineDash([]);
       };
 
+      // 이동 구역: keepout(금지) 빨강 면, allowed(허용) 초록 테두리
+      if (st.zones && st.zones.length && this.layers.zones !== false) {
+        for (const z of st.zones) {
+          if (!z.points || z.points.length < 3) continue;
+          ctx.beginPath();
+          z.points.forEach((p, i) => { const [sx, sy] = this.toScreen(p[0], p[1]); if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
+          ctx.closePath();
+          const keep = z.type === 'keepout';
+          ctx.fillStyle = keep ? `rgba(248,113,113,${z.dim ? 0.06 : 0.2})` : `rgba(74,222,128,${z.dim ? 0.03 : 0.08})`;
+          ctx.fill();
+          ctx.strokeStyle = keep ? '#F87171' : '#4ADE80';
+          ctx.globalAlpha = z.dim ? 0.35 : 1;
+          ctx.lineWidth = z.selected ? 3 : 1.5;
+          ctx.setLineDash(keep ? [] : [6, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          if (z.label) {
+            const c = z.points.reduce((a, p) => [a[0] + p[0] / z.points.length, a[1] + p[1] / z.points.length], [0, 0]);
+            const [lx, ly] = this.toScreen(c[0], c[1]);
+            ctx.font = '600 12px Inter, "Noto Sans KR", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = keep ? '#FCA5A5' : '#86EFAC';
+            ctx.fillText(z.label, lx, ly);
+            ctx.textAlign = 'start';
+          }
+          ctx.globalAlpha = 1;
+        }
+      }
+      // 그리는 중인 다각형
+      if (st.draftPoly && st.draftPoly.length) {
+        const pts = st.cursor ? [...st.draftPoly, st.cursor] : st.draftPoly;
+        line(pts, '#FBBF24', 2, [5, 4]);
+        ctx.fillStyle = '#FBBF24';
+        st.draftPoly.forEach((p, i) => {
+          const [sx, sy] = this.toScreen(p[0], p[1]);
+          ctx.beginPath(); ctx.arc(sx, sy, i === 0 ? 6 : 4, 0, Math.PI * 2); ctx.fill();
+        });
+      }
+
       if (this.layers.path) {
         line(st.trail, 'rgba(45,212,191,0.55)', 2.5, [6, 5]);
         line(st.plan, COLORS.plan, 2.5);
@@ -266,7 +327,7 @@
 
       // 로봇
       if (st.robots) {
-        if (!st.robots.some((r) => r.pose)) {
+        if (!st.robots.some((r) => r.pose) && this.emptyText !== '') {
           ctx.fillStyle = COLORS.text;
           ctx.font = '13px Inter, "Noto Sans KR", sans-serif';
           ctx.textAlign = 'center';

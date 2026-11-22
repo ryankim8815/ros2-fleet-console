@@ -26,6 +26,7 @@
       sounds: [[0, 'OFF'], [1, 'ON'], [2, 'LOW_BATTERY'], [3, 'ERROR'], [4, 'BUTTON1'], [5, 'BUTTON2']],
       lowVoltage: 10.5,
       voltageRange: [9.9, 12.6],
+      radius: 0.105,                                    // 몸체 반지름 (m), 구역 판정용
     },
     pinky: {
       label: 'Pinky Pro',
@@ -46,6 +47,7 @@
       emotions: ['hello', 'basic', 'happy', 'fun', 'interest', 'bored', 'sad', 'angry'],
       lowVoltage: 6.8,                                  // bringup.py LOW_BATTERY_THRESHOLD
       voltageRange: [6.4, 8.4],                         // 2S 추정 (Pinky 배터리 사양 미확인)
+      radius: 0.07,                                     // 몸체 반지름 추정 (바퀴 간격 0.096 m)
     },
   };
 
@@ -66,6 +68,32 @@
   };
 
   const P2 = () => Pose2;
+
+  // ---- 이동 구역 (금지/허용) 판정 ----
+  function inPolygon(x, y, pts) {
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i, i += 1) {
+      const [xi, yi] = pts[i], [xj, yj] = pts[j];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  // 점(x,y)이 이 로봇에게 금지인지: keepout 안이거나, allowed 구역이 있는데 그 밖
+  function forbidden(zones, x, y) {
+    if (!zones || !zones.length) return false;
+    if (zones.some((z) => z.type === 'keepout' && inPolygon(x, y, z.points))) return true;
+    const allowed = zones.filter((z) => z.type === 'allowed');
+    return allowed.length > 0 && !allowed.some((z) => inPolygon(x, y, z.points));
+  }
+  // 로봇 몸체(반지름 r)의 둘레 8점 + 중심 중 하나라도 금지면 금지
+  function bodyForbidden(zones, p, r) {
+    if (forbidden(zones, p.x, p.y)) return true;
+    for (let k = 0; k < 8; k += 1) {
+      const a = (k * Math.PI) / 4;
+      if (forbidden(zones, p.x + r * Math.cos(a), p.y + r * Math.sin(a))) return true;
+    }
+    return false;
+  }
   const norm = (f) => (f || '').replace(/^\//, '');
 
   class Robot {
@@ -247,9 +275,33 @@
       if (!type && tries > 1) setTimeout(() => this.detectCmdVelType(tries - 1), 2000);
     }
 
+    // 수동 조종이 금지 구역으로 들어가려 하면 true (0.6초 앞을 예측). 이미 금지 구역 안이면 빠져나가는 것은 허용
+    zoneBlocks(lin, ang) {
+      const p = this.mapPose;
+      if (!this.zones || !this.zones.length || !p || (!lin && !ang)) return false;
+      const r = this.profile.radius || 0.1;
+      // 이미 금지 구역에 걸쳐 있으면 막지 않음 (그래야 조종해서 빠져나올 수 있음)
+      if (bodyForbidden(this.zones, p, r)) return false;
+      const dt = 0.6, steps = 6;
+      let q = { ...p };
+      for (let i = 0; i < steps; i += 1) {
+        q = { x: q.x + Math.cos(q.th) * lin * (dt / steps), y: q.y + Math.sin(q.th) * lin * (dt / steps), th: q.th + ang * (dt / steps) };
+        if (bodyForbidden(this.zones, q, r)) return true;
+      }
+      return false;
+    }
+
     cmdVel(lin, ang) {
       lin = Math.max(-this.limits.lin, Math.min(this.limits.lin, lin || 0));
       ang = Math.max(-this.limits.ang, Math.min(this.limits.ang, ang || 0));
+      if (this.zoneBlocks(lin, ang)) {
+        lin = 0; ang = 0;
+        const now = performance.now();
+        if (now - (this.lastZoneBlock || 0) > 2000) {
+          this.lastZoneBlock = now;
+          document.dispatchEvent(new CustomEvent('tb3:zone-block', { detail: this }));
+        }
+      }
       const twist = { linear: { x: lin, y: 0, z: 0 }, angular: { x: 0, y: 0, z: ang } };
       let msg = twist;
       if (this.cmdVelType.endsWith('TwistStamped')) {
@@ -302,6 +354,7 @@
   Robot.UNSTABLE_MS = 1000;
   Robot.OFFLINE_MS = 5000;
   window.Pose2 = Pose2;
+  window.Zones = { inPolygon, forbidden, bodyForbidden };
   window.Profiles = Profiles;
   window.Robot = Robot;
 })();

@@ -126,6 +126,49 @@
     store.set('tb3.robot', robot.id);
   }
 
+  // ---------- 관리자 토큰이 필요한 요청 (구역 저장, 지도 작성, 활성 지도 지정) ----------
+  async function adminFetch(url, opts = {}, retry = true) {
+    const token = store.get('tb3.adminToken', '');
+    const r = await fetch(url, { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}), 'X-Admin-Token': token } });
+    if (r.status === 401 && retry) {
+      const t = prompt('관리자 토큰을 입력하세요.\nPC 에서: cat ~/turtlebot3/ros2-fleet-console/config/admin_token', '');
+      if (!t) throw new Error('토큰이 없어 취소했습니다');
+      store.set('tb3.adminToken', t.trim());
+      return adminFetch(url, opts, false);
+    }
+    if (r.status === 401) store.set('tb3.adminToken', '');
+    return r;
+  }
+  async function adminJson(url, opts) {
+    const r = await adminFetch(url, opts);
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    return body;
+  }
+  // 활성 지도(지도 작성·구역·Nav2 기준) 지정: fleet.json 의 mapFile
+  async function setActiveMap(name) {
+    const body = { ...fleet, mapFile: name };
+    if (!name) delete body.mapFile;
+    fleet = await adminJson('/api/fleet', { method: 'PUT', body: JSON.stringify(body) });
+    await loadZones();
+    return fleet;
+  }
+
+  // ---------- 이동 구역 (활성 지도 fleet.mapFile 의 구역) ----------
+  let zonesDoc = { map: '', zones: [] };
+  async function loadZones() {
+    zonesDoc = { map: fleet.mapFile || '', zones: [] };
+    if (fleet.mapFile) {
+      try {
+        const r = await fetch(`/api/zones/${encodeURIComponent(fleet.mapFile)}`, { cache: 'no-store' });
+        if (r.ok) zonesDoc = await r.json();
+      } catch (e) { /* 구역 없이 동작 */ }
+    }
+    robots.forEach((r) => { r.zones = zonesDoc.zones.filter((z) => z.robots.includes('*') || z.robots.includes(r.id)); });
+    return zonesDoc;
+  }
+  document.addEventListener('tb3:zone-block', (e) => toast(`${e.detail.name}: 이동 금지 구역이라 멈췄습니다`, 'warn', 2500));
+
   function robotUrl(id, page) {
     const u = new URL(page || location.pathname, location.href);
     u.searchParams.set('robot', id);
@@ -208,6 +251,8 @@
   const App = {
     ros, store, $, $$, esc, fmt, toast, toastAction, estop, trackGoal, robotUrl, control,
     get fleet() { return fleet; },
+    get zones() { return zonesDoc; },
+    loadZones, adminFetch, adminJson, setActiveMap,
     get robots() { return robots; },
     get robot() { return robot; },
     // 이전 단일 로봇 코드 호환
@@ -218,9 +263,10 @@
   App.ready = new Promise((resolve) => {
     document.addEventListener('DOMContentLoaded', async () => {
       await loadFleet();
+      await loadZones();
       bindHeader();
-      // 현재 로봇의 기본 상태 구독 (배터리 표시용). 플릿 페이지는 직접 모든 로봇을 시작함
-      if (!document.body.dataset.fleet) robot.start({ tf: false });
+      // 현재 로봇의 기본 상태 구독 (배터리 표시, 구역 판정용 지도 위치). 플릿 페이지는 직접 모든 로봇을 시작함
+      if (!document.body.dataset.fleet) robot.start({ tf: true });
       robot.onChange(renderBattery);
       setInterval(renderBattery, 5000);
       ros.connect();

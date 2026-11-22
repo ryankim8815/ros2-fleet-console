@@ -346,14 +346,18 @@ ros2-fleet-console/
 │   ├── README.md            로봇 쪽 사용법
 │   ├── tb3_ns.launch.py     TurtleBot3 네임스페이스 + TF 분리 (로봇에서 실행)
 │   ├── pinky_ns.launch.py   Pinky Pro 네임스페이스 + TF 분리 (로봇에서 실행)
-│   └── nav2_ns.launch.py    로봇별 Nav2 (PC 에서 실행)
-├── serve.py                 정적 파일 + /api/fleet (토큰) + /api/control (조종 권한)
+│   ├── nav2_ns.launch.py    로봇별 Nav2 + keepout 필터 (PC 에서 실행)
+│   └── mapping_ns.launch.py 로봇 한 대 slam_toolbox (PC, 웹 지도 작성이 실행)
+├── serve.py                 정적 파일 + /api/fleet · control · maps · zones · mapping
+├── maps.py                  지도·구역·마스크·지도 작성 프로세스
 └── web/
     ├── fleet.html           플릿
     ├── index.html           로봇 대시보드
     ├── interfaces.html      ROS 2 인터페이스
     ├── mobile.html          모바일 조종
     ├── setup.html           로봇 등록
+    ├── mapping.html         지도 작성
+    ├── zones.html           이동 구역
     ├── css/app.css
     └── js/
         ├── ros.js           rosbridge 클라이언트
@@ -467,3 +471,72 @@ flowchart LR
 
 공개 저장소 `pinklab-art/pinky_pro` 의 소스(bringup.py, battery_publisher.py, led_server.py, emotion_server.py, srv 파일)를 보고 작성했습니다.
 PC 에서 이름·구조가 같은 가짜 패키지로 `pinky_ns.launch.py`(네임스페이스·TF 분리)와 LED·표정 호출(실제 `pinky_interfaces` 타입)을 확인했고, 실제 Pinky 에서는 아직 시험하지 않았습니다.
+
+---
+
+## 11. 지도 작성과 이동 구역
+
+### 처음 시작 흐름
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 사용자
+    participant W as 웹 (mapping.html / zones.html)
+    participant S as serve.py + maps.py
+    participant L as slam_toolbox (PC, /tb3_01)
+    participant N as Nav2 (PC, /tb3_01)
+
+    U->>W: 지도 작성: 로봇 선택 → 시작
+    W->>S: POST /api/mapping/start (토큰)
+    S->>L: ros2 launch mapping_ns.launch.py (새 프로세스 그룹)
+    L-->>W: /tb3_01/map (PNG 압축) · map→odom TF
+    U->>W: 웹으로 조종하며 지도 넓히기
+    U->>W: 저장 (이름 lab, 활성 지도로)
+    W->>S: POST /api/mapping/save
+    S->>S: map_saver_cli -t /tb3_01/map → config/maps/lab.yaml|pgm
+    W->>S: PUT /api/fleet (mapFile: lab)
+    U->>W: 끝내기 → POST /api/mapping/stop (SIGINT 로 그룹 종료)
+    U->>W: 이동 구역: 다각형 그리기, 로봇별 적용 → 저장
+    W->>S: PUT /api/zones/lab (토큰)
+    S->>S: 검증 → config/zones/lab.json, 로봇별 마스크 config/masks/lab/<ns>.pgm
+    U->>N: nav2_ns.launch.py map:=lab (마스크 있으면 keepout 필터 자동)
+    W->>N: 구역 다시 저장 시 /tb3_01/keepout_filter_mask_server/load_map (즉시 반영)
+```
+
+### 마스크 (로봇마다)
+
+```mermaid
+flowchart LR
+    Z["구역 목록<br/>keepout / allowed<br/>robots: * 또는 id"] --> F["이 로봇에 해당하는 구역만"]
+    F --> G["격자 채우기 (셀 중심)<br/>allowed 있으면 바깥 전부 금지<br/>keepout 안 금지"]
+    G --> B["비용 띠<br/>금지 = 100, 반지름 이내 = 99<br/>0.35 m 까지 지수 감소"]
+    B --> P["PGM (mode: scale)<br/>+ yaml"]
+    P --> K["Nav2 KeepoutFilter<br/>global · local costmap"]
+```
+
+KeepoutFilter 는 금지 셀을 부풀리지 않습니다. 금지 셀만 두면 경로가 경계에 붙고, DWB 는 로봇 몸체가 금지 셀에 닿아 "모든 궤적 충돌"로 멈춥니다.
+금지 영역을 넓히는 것으로는 해결되지 않아(경로가 넓힌 경계에 다시 붙음), inflation 과 같은 비용 띠를 마스크에 넣습니다.
+costmap 노드는 `/<ns>/global_costmap` 안에 있어 상대 토픽 이름이 그 아래로 풀리므로, 필터 정보·마스크 토픽은 절대 이름(`/<ns>/keepout_…`)을 씁니다.
+
+### 웹 수동 조종 차단 (`Robot.zoneBlocks`)
+
+| 단계 | 내용 |
+| --- | --- |
+| 입력 | 보내려는 v, ω 와 로봇의 지도 위 자세(map → odom TF + odom) |
+| 예측 | 0.6초를 6구간으로 적분한 자세마다 몸체(반지름) 둘레 8점 + 중심이 금지인지 |
+| 결과 | 금지면 v=ω=0 으로 바꿔 보내고 `tb3:zone-block` 알림(2초 간격) |
+| 예외 | 이미 금지 구역에 걸쳐 있으면 막지 않음(빠져나오기), 지도 위치를 모르면 막지 않음 |
+
+### API
+
+| 요청 | 토큰 | 내용 |
+| --- | --- | --- |
+| `GET /api/maps` | — | 저장된 지도 목록 (크기·해상도·원점·구역 유무) |
+| `GET /api/maps/<이름>.png` | — | 지도 이미지 (웹 색, 미탐색 투명) |
+| `GET /api/zones/<이름>` | — | 구역 |
+| `PUT /api/zones/<이름>` | 필요 | 구역 저장 + 로봇별 마스크 생성 (구역 64개, 점 200개 이하) |
+| `GET /api/mapping` | — | 지도 작성 상태 |
+| `POST /api/mapping/start` `{robot}` | 필요 | slam_toolbox 시작 (한 번에 한 로봇) |
+| `POST /api/mapping/save` `{name}` | 필요 | `map_saver_cli` 로 저장, yaml 의 image 를 상대 경로로 |
+| `POST /api/mapping/stop` | 필요 | 프로세스 그룹 종료 (serve.py 종료 때도 자동) |

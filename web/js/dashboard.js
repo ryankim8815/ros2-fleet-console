@@ -109,6 +109,12 @@ window.App.ready.then((App) => {
   }
   setInterval(placeMap, 1000);
 
+  // ---- 이 로봇에 적용되는 이동 구역 (map 프레임 → 표시 프레임) ----
+  setInterval(() => {
+    const T = frameToDisplay('map');
+    st.zones = (R.zones || []).map((z) => ({ ...z, label: z.name, points: z.points.map(([x, y]) => P.apply(T, x, y)) }));
+  }, 1000);
+
   // ---- plan ----
   ros.subscribe(R.topic('plan'), 'nav_msgs/msg/Path', (m) => {
     mon(R.topic('plan'));
