@@ -1,0 +1,14 @@
+{
+  "mapTopic": "/map",
+  "robots": [
+    {
+      "id": "burger_01",
+      "name": "burger-01",
+      "type": "turtlebot3",
+      "ns": "",
+      "tfTopic": "/tf",
+      "tfPrefix": "",
+      "color": "#2DD4BF"
+    }
+  ]
+}

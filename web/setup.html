@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>로봇 관제센터 · 로봇 등록</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body data-fleet="1">
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="fleet.html">
+      <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="12" fill="none" stroke="#2DD4BF" stroke-width="2"/><circle cx="9" cy="14" r="3" fill="#2DD4BF"/><circle cx="19" cy="14" r="3" fill="#FB923C"/></svg>
+      로봇 관제센터
+    </a>
+    <nav aria-label="주 메뉴" style="display: flex; gap: 4px; flex-wrap: wrap">
+      <a class="btn btn-sm" href="fleet.html" style="text-decoration: none">플릿</a>
+      <a class="btn btn-sm" href="index.html" style="text-decoration: none">로봇 대시보드</a>
+      <a class="btn btn-sm" href="interfaces.html" style="text-decoration: none">ROS 2 인터페이스</a>
+      <a class="btn btn-sm" href="setup.html" aria-current="page" style="text-decoration: none; background: var(--raised)">로봇 등록</a>
+    </nav>
+    <button class="pill" data-conn="wait" title="클릭하여 rosbridge 주소 변경"><span class="dot"></span><span data-conn-text>연결 중…</span><span class="mono" data-latency></span></button>
+    <div class="spacer"></div>
+    <button class="estop" data-estop title="단축키 Esc">전체 비상정지</button>
+  </header>
+
+  <div class="row" style="padding: 20px; align-items: flex-start">
+    <main class="col" style="flex: 999 1 640px">
+      <section class="panel">
+        <div class="panel-head">
+          <h1 style="font-size: 17px">등록된 로봇</h1>
+          <span class="muted" style="font-size: 12px">ros2-fleet-console/config/fleet.json · 모든 로봇이 같은 ROS_DOMAIN_ID, rosbridge 하나</span>
+          <div class="spacer"></div>
+          <button class="btn" id="discover">네임스페이스 자동 검색</button>
+          <button class="btn btn-primary" id="save" disabled>저장</button>
+        </div>
+        <div class="table-wrap">
+          <table class="t">
+            <thead><tr><th>이름</th><th>종류</th><th>네임스페이스</th><th>TF 토픽</th><th>TF 접두사</th><th>상태</th><th><span class="sr-only">작업</span></th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <label class="field" style="max-width: 360px">공유 지도 토픽 <input id="map-topic" class="mono" pattern="/[A-Za-z][A-Za-z0-9_\/]*" placeholder="/map"></label>
+        <div class="muted" style="font-size: 12px">로봇별 Nav2(nav2_ns.launch.py)를 쓰면 지도가 &lt;ns&gt;/map 으로 나오므로 그중 하나(예: /tb3_01/map)를 적습니다.</div>
+        <div class="muted" style="font-size: 12px" id="dirty-note"></div>
+      </section>
+
+      <section class="panel hidden" id="found-panel">
+        <div class="panel-head"><h2>검색된 네임스페이스</h2><span class="muted" style="font-size: 12px">토픽 목록에서 &lt;ns&gt;/odom (Odometry) 를 찾았습니다</span></div>
+        <div id="found"></div>
+      </section>
+
+      <section class="panel">
+        <h2>로봇 쪽 실행 방법 (네임스페이스)</h2>
+        <div class="muted" style="font-size: 13px; line-height: 1.7">
+          <b style="color: var(--text)">TurtleBot3</b> · bringup 의 <span class="mono">namespace</span> 인자를 쓰면 토픽은 <span class="mono">/tb3_01/…</span>, TF 프레임은 <span class="mono">tb3_01/odom</span> 처럼 접두사가 붙고 TF 는 전역 <span class="mono">/tf</span> 로 나갑니다.
+        </div>
+        <pre class="code">ros2 launch turtlebot3_bringup robot.launch.py namespace:=tb3_01   # 조종·모니터링만 (TF: /tf)
+ros2 launch tb3_ns.launch.py namespace:=tb3_01                    # 로봇별 Nav2 와 함께 (TF: /tb3_01/tf)</pre>
+        <div class="muted" style="font-size: 13px; line-height: 1.7">로봇별 Nav2 는 PC 에서 <span class="mono">ros2-fleet-console/robot/nav2_ns.launch.py</span> 로 실행합니다. 자세한 순서: <span class="mono">ros2-fleet-console/robot/README.md</span></div>
+        <div class="muted" style="font-size: 13px; line-height: 1.7">
+          <b style="color: var(--text)">Pinky Pro</b> · bringup 에 namespace 인자가 없고 TF 프레임 이름(odom, base_footprint)이 고정이라, 래퍼 launch 로 네임스페이스를 씌우고 TF 를 <span class="mono">/pinky_01/tf</span> 로 분리합니다. 파일: <span class="mono">ros2-fleet-console/robot/pinky_ns.launch.py</span> (Pinky 로봇에 복사해서 실행)
+        </div>
+        <pre class="code">ros2 launch pinky_ns.launch.py namespace:=pinky_01</pre>
+      </section>
+    </main>
+
+    <aside class="panel" style="flex: 1 1 380px" aria-label="로봇 추가 또는 편집">
+      <h2 id="form-title">로봇 추가</h2>
+      <form id="form" class="col" style="gap: 12px" autocomplete="off">
+        <div role="radiogroup" aria-label="로봇 종류" class="grid2" id="type-pick">
+          <button type="button" class="btn" role="radio" data-type="turtlebot3" aria-checked="true" style="flex-direction: column; align-items: flex-start; min-height: 60px">TurtleBot3<span class="muted" style="font-size: 11px">Burger · ROBOTIS</span></button>
+          <button type="button" class="btn" role="radio" data-type="pinky" aria-checked="false" style="flex-direction: column; align-items: flex-start; min-height: 60px">Pinky Pro<span class="muted" style="font-size: 11px">Pinklab</span></button>
+        </div>
+        <div class="grid2">
+          <label class="field">이름 <input name="name" required maxlength="40" placeholder="burger-02"></label>
+          <label class="field">ID <input name="id" required pattern="[A-Za-z][A-Za-z0-9_]{0,40}" placeholder="burger_02"></label>
+        </div>
+        <label class="field">네임스페이스 <input name="ns" class="mono" pattern="(/[A-Za-z][A-Za-z0-9_]*)*" placeholder="/tb3_02 (없으면 비움)"></label>
+        <div class="grid2">
+          <label class="field">TF 토픽 <input name="tfTopic" class="mono" required pattern="/[A-Za-z][A-Za-z0-9_\/]*" placeholder="/tf"></label>
+          <label class="field">TF 프레임 접두사 <input name="tfPrefix" class="mono" pattern="([A-Za-z][A-Za-z0-9_]*/)?" placeholder="tb3_02/"></label>
+        </div>
+        <div class="muted" style="font-size: 12px" id="tf-hint"></div>
+        <div class="field">표시 색
+          <div role="radiogroup" aria-label="표시 색" style="display: flex; gap: 8px; flex-wrap: wrap" id="colors"></div>
+        </div>
+        <div style="background: var(--bg); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 6px">
+          <div class="panel-head"><span class="muted" style="font-size: 12px">연결 확인</span><div class="spacer"></div><button type="button" class="btn btn-sm" id="test">연결 테스트</button></div>
+          <div id="checks" style="display: flex; flex-direction: column; gap: 6px"></div>
+        </div>
+        <div style="display: flex; gap: 8px">
+          <button type="button" class="btn" id="cancel-edit" style="flex: 1 1 0">새로 입력</button>
+          <button type="submit" class="btn btn-primary" id="submit" style="flex: 1 1 0">목록에 추가</button>
+        </div>
+      </form>
+    </aside>
+  </div>
+</div>
+<script src="js/ros.js"></script>
+<script src="js/robot.js"></script>
+<script src="js/common.js"></script>
+<script src="js/setup.js"></script>
+</body>
+</html>

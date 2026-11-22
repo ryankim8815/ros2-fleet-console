@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>로봇 관제센터 · ROS 2 인터페이스</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="index.html">
+      <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="12" fill="none" stroke="#2DD4BF" stroke-width="2"/><circle cx="14" cy="14" r="4" fill="#2DD4BF"/><path d="M14 2v5M14 21v5" stroke="#2DD4BF" stroke-width="2"/></svg>
+      로봇 관제센터
+    </a>
+    <span class="muted" style="font-size: 13px">/ ROS 2 인터페이스</span>
+    <button class="pill" data-conn="wait" title="클릭하여 rosbridge 주소 변경"><span class="dot"></span><span data-conn-text>연결 중…</span><span class="mono" data-latency></span></button>
+    <a href="fleet.html" class="btn btn-sm" style="text-decoration: none">플릿</a>
+    <a href="index.html" class="btn btn-sm" style="text-decoration: none">로봇 대시보드</a>
+    <div class="spacer"></div>
+    <label class="lockbar"><input type="checkbox" id="write-lock" checked> 쓰기 잠금 (읽기 전용)</label>
+    <button class="btn" id="refresh">새로고침</button>
+    <button class="estop" data-estop title="단축키 Esc">전체 비상정지</button>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="인터페이스 종류">
+    <button role="tab" data-tab="node" aria-selected="true">노드 <span class="count" id="c-node">—</span></button>
+    <button role="tab" data-tab="topic" aria-selected="false">토픽 <span class="count" id="c-topic">—</span></button>
+    <button role="tab" data-tab="service" aria-selected="false">서비스 <span class="count" id="c-service">—</span></button>
+    <button role="tab" data-tab="action" aria-selected="false">액션 <span class="count" id="c-action">—</span></button>
+    <button role="tab" data-tab="param" aria-selected="false">파라미터</button>
+  </div>
+
+  <div class="row" style="padding: 20px; align-items: flex-start; flex: 1 1 auto">
+    <!-- 노드 목록 -->
+    <aside class="panel" aria-label="노드 목록" style="flex: 1 1 240px; max-width: 100%">
+      <label class="field">노드 검색 <input type="search" id="node-q" placeholder="/turtlebot3"></label>
+      <div class="list" id="node-list"><div class="empty">불러오는 중…</div></div>
+    </aside>
+
+    <!-- 가운데 -->
+    <main class="col" style="flex: 999 1 520px" id="center"></main>
+
+    <!-- 인스펙터 -->
+    <aside class="col" aria-label="인스펙터" style="flex: 1 1 360px; max-width: 100%">
+      <section class="panel" id="insp-empty">
+        <h2>인스펙터</h2>
+        <div class="empty">토픽, 서비스, 액션을 선택하면 여기서 메시지를 보거나 호출할 수 있습니다.</div>
+      </section>
+
+      <section class="panel hidden" id="insp-topic">
+        <div class="panel-head">
+          <h2>토픽 Echo</h2>
+          <span class="mono" style="font-size: 12px; color: var(--accent); overflow-wrap: anywhere" id="echo-name"></span>
+          <div class="spacer"></div>
+          <button class="btn btn-icon" id="echo-pause" aria-label="일시정지" aria-pressed="false">
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.5v9M9 1.5v9" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+          <button class="btn btn-icon" id="echo-close" aria-label="닫기">✕</button>
+        </div>
+        <div class="sub-type" id="echo-type"></div>
+        <div class="grid3">
+          <div class="tile"><div class="k">주기</div><div class="v" style="font-size: 14px" id="echo-hz">—</div></div>
+          <div class="tile"><div class="k">대역폭</div><div class="v" style="font-size: 14px" id="echo-bw">—</div></div>
+          <div class="tile"><div class="k">Pub / Sub</div><div class="v" style="font-size: 14px" id="echo-ps">—</div></div>
+        </div>
+        <pre class="code" id="echo-msg">메시지 대기 중…</pre>
+        <details id="pub-box">
+          <summary style="cursor: pointer; font-size: 13px; color: var(--text-2); padding: 4px 0">메시지 직접 발행 (Publish)</summary>
+          <div style="display: flex; flex-direction: column; gap: 8px; padding-top: 8px">
+            <textarea id="pub-json" rows="10" spellcheck="false" aria-label="발행할 메시지 JSON"></textarea>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap">
+              <button class="btn btn-primary" data-write id="pub-send">1회 발행</button>
+              <button class="btn" id="pub-template">기본값으로 채우기</button>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel hidden" id="insp-service">
+        <div class="panel-head">
+          <h2>서비스 호출</h2>
+          <span class="mono" style="font-size: 12px; color: var(--accent); overflow-wrap: anywhere" id="srv-name"></span>
+          <div class="spacer"></div>
+          <button class="btn btn-icon" id="srv-close" aria-label="닫기">✕</button>
+        </div>
+        <div class="sub-type" id="srv-type"></div>
+        <label class="field">Request (JSON)
+          <textarea id="srv-json" rows="8" spellcheck="false"></textarea></label>
+        <button class="btn btn-primary" data-write id="srv-call">호출</button>
+        <pre class="code hidden" id="srv-res"></pre>
+      </section>
+
+      <section class="panel hidden" id="insp-action">
+        <div class="panel-head">
+          <h2>액션</h2>
+          <span class="mono" style="font-size: 12px; color: var(--accent); overflow-wrap: anywhere" id="act-name"></span>
+          <div class="spacer"></div>
+          <button class="btn btn-icon" id="act-close" aria-label="닫기">✕</button>
+        </div>
+        <label class="field">액션 타입 <span class="muted" id="act-type">이름으로 추정 · 틀리면 직접 수정</span>
+          <input id="act-type-in" spellcheck="false" style="font-family: var(--mono); font-size: 12.5px" placeholder="nav2_msgs/action/NavigateToPose"></label>
+        <button class="btn btn-sm" id="act-tpl" style="align-self: flex-start">이 타입의 기본 Goal 채우기</button>
+        <label class="field">Goal (JSON)
+          <textarea id="act-json" rows="8" spellcheck="false"></textarea></label>
+        <div style="display: flex; gap: 8px">
+          <button class="btn btn-primary" data-write id="act-send" style="flex: 1">Goal 전송</button>
+          <button class="btn btn-danger-outline" id="act-cancel" disabled style="flex: 1">Goal 취소</button>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 12px" class="muted"><span id="act-state">대기</span><span class="mono" id="act-time"></span></div>
+        <div class="muted" style="font-size: 12px">Feedback</div>
+        <pre class="code" id="act-fb">—</pre>
+        <div class="muted" style="font-size: 12px">Result</div>
+        <pre class="code" id="act-res">—</pre>
+      </section>
+    </aside>
+  </div>
+</div>
+<script src="js/ros.js"></script>
+<script src="js/robot.js"></script>
+<script src="js/common.js"></script>
+<script src="js/interfaces.js"></script>
+</body>
+</html>
