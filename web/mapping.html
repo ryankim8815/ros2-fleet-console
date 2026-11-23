@@ -3,20 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>로봇 관제센터 · 지도 작성</title>
+<title>로봇 관제센터 · 지도 만들기</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;700&display=swap">
 <link rel="stylesheet" href="css/app.css">
 <style>
-  .steps { display: flex; flex-direction: column; gap: 12px; }
-  .step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; align-items: start; }
-  .step .num { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--raised); color: var(--text-2); font-weight: 700; font-size: 13px; }
-  .step[data-state="done"] .num { background: rgba(74, 222, 128, 0.16); color: var(--ok); }
-  .step[data-state="now"] .num { background: var(--accent); color: #0E1116; }
-  .step h3 { margin: 4px 0 6px; font-size: 14px; }
-  .pick { display: flex; flex-direction: column; gap: 6px; }
-  .pick label { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--bg); cursor: pointer; }
-  .pick label.off { opacity: 0.5; cursor: not-allowed; }
+  .rrow { display: grid; grid-template-columns: auto minmax(0, 1fr) repeat(3, 64px); gap: 6px; align-items: center; padding: 8px 10px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); }
+  .rrow.off { opacity: 0.5; }
+  .rrow input[type=number] { width: 100%; padding: 6px; font-family: var(--mono); font-size: 12px; background: var(--panel); color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; }
+  .rrow .hd { font-size: 11px; color: var(--muted); text-align: center; }
+  .contrib { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .contrib .bar { flex: 1 1 auto; height: 6px; border-radius: 999px; background: var(--bg); overflow: hidden; }
+  .contrib .bar > div { height: 100%; }
 </style>
 </head>
 <body data-fleet="1">
@@ -28,10 +26,10 @@
     </a>
     <nav aria-label="주 메뉴" class="topnav">
       <a class="btn btn-sm" href="fleet.html">플릿</a>
-      <a class="btn btn-sm" href="mapping.html" aria-current="page">지도 작성</a>
+      <a class="btn btn-sm" href="mapping.html" aria-current="page">지도 만들기</a>
+      <a class="btn btn-sm" href="patrol.html">경비</a>
       <a class="btn btn-sm" href="zones.html">이동 구역</a>
       <a class="btn btn-sm" href="index.html">로봇 대시보드</a>
-      <a class="btn btn-sm" href="interfaces.html">ROS 2 인터페이스</a>
       <a class="btn btn-sm" href="setup.html">로봇 등록</a>
     </nav>
     <button class="pill" data-conn="wait" title="클릭하여 rosbridge 주소 변경"><span class="dot"></span><span data-conn-text>연결 중…</span><span class="mono" data-latency></span></button>
@@ -39,55 +37,67 @@
     <button class="estop" data-estop title="단축키 Esc">전체 비상정지</button>
   </header>
 
+  <div class="banner hidden" id="mode-banner" style="margin: 16px 20px 0"></div>
+
   <div class="row" style="padding: 20px; align-items: flex-start">
-    <aside class="panel" style="flex: 1 1 340px" aria-label="지도 작성 단계">
-      <h1 style="font-size: 16px">지도 작성 <span class="muted" style="font-weight: 400; font-size: 12px">로봇 한 대로 · slam_toolbox</span></h1>
-      <div class="steps">
-        <div class="step" id="s1"><span class="num">1</span><div>
-          <h3>지도를 그릴 로봇 고르기</h3>
-          <div class="pick" id="robot-pick" role="radiogroup" aria-label="로봇"></div>
-        </div></div>
-        <div class="step" id="s2"><span class="num">2</span><div>
-          <h3>SLAM 시작</h3>
-          <div class="muted" style="font-size: 12px; line-height: 1.6">PC 에서 그 로봇의 네임스페이스로 slam_toolbox 를 띄웁니다. 다른 로봇은 그동안 움직이지 않는 편이 지도 품질에 좋습니다.</div>
-          <div style="display: flex; gap: 8px; margin-top: 8px">
-            <button class="btn btn-primary" id="start">시작</button>
-            <button class="btn btn-danger-outline" id="stop" disabled>끝내기</button>
-          </div>
-          <div class="muted mono" style="font-size: 12px; margin-top: 6px" id="run-state"></div>
-        </div></div>
-        <div class="step" id="s3"><span class="num">3</span><div>
-          <h3>천천히 조종하며 공간을 한 바퀴</h3>
-          <div class="muted" style="font-size: 12px; line-height: 1.6">벽을 따라 천천히, 같은 곳으로 한 번 돌아오면(루프) 지도가 반듯해집니다. <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · 정지 <kbd>Space</kbd></div>
-          <div class="pad" style="margin-top: 8px">
-            <div></div><button data-dir="f" aria-label="전진">▲</button><div></div>
-            <button data-dir="l" aria-label="좌회전">◀</button><button class="stop" data-dir="stop" aria-label="정지">정지</button><button data-dir="r" aria-label="우회전">▶</button>
-            <div></div><button data-dir="b" aria-label="후진">▼</button><div></div>
-          </div>
-          <label class="field" style="margin-top: 8px"><span class="line">속도 <b id="spd-val"></b></span>
-            <input type="range" id="spd" min="0.2" max="1" step="0.05" value="0.5"></label>
-        </div></div>
-        <div class="step" id="s4"><span class="num">4</span><div>
-          <h3>지도 저장</h3>
-          <div style="display: flex; gap: 8px">
-            <input id="map-name" placeholder="lab" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,40}" aria-label="지도 이름" style="flex: 1 1 auto; min-width: 0">
-            <button class="btn btn-primary" id="save" disabled>저장</button>
-          </div>
-          <label class="muted" style="font-size: 12px; display: flex; gap: 6px; align-items: center; margin-top: 6px"><input type="checkbox" id="make-active" checked> 저장한 지도를 활성 지도로 (구역·Nav2 기준)</label>
-          <div id="saved" class="col" style="gap: 6px; margin-top: 6px"></div>
-        </div></div>
-      </div>
+    <aside class="col" style="flex: 1 1 360px" aria-label="지도 만들기 설정과 진행">
+      <section class="panel">
+        <div class="panel-head"><h1 style="font-size: 16px">지도 만들기</h1><span class="badge" id="run-badge">대기</span><div class="spacer"></div><span class="muted mono" id="run-time"></span></div>
+        <div class="muted" style="font-size: 12px; line-height: 1.6">
+          참여할 로봇과 <b style="color: var(--text)">시작 자세</b>(공통 지도 기준 x, y m · 방향 °)를 정합니다. 기준이 되는 로봇 한 대를 (0, 0, 0) 으로 두고,
+          나머지는 그 로봇에서 얼마나 떨어져 있는지 적습니다. 자세가 정확할수록 지도가 잘 합쳐집니다.
+        </div>
+        <div class="col" style="gap: 6px" id="robot-rows"></div>
+        <label class="muted" style="font-size: 13px; display: flex; gap: 8px; align-items: flex-start"><input type="checkbox" id="explore" style="margin-top: 3px">
+          <span><b style="color: var(--text)">자동 탐색</b> — 로봇마다 Nav2 + explore_lite 로 미탐색 경계를 스스로 찾아감<br><span style="font-size: 11px">TF 를 /&lt;ns&gt;/tf 로 보내는 로봇만 (tb3_ns, pinky_ns). 끄면 사람이 조종해서 그립니다.</span></span></label>
+        <div style="display: flex; gap: 8px">
+          <button class="btn btn-primary" id="start" style="flex: 2 1 0; min-height: 44px">시작</button>
+          <button class="btn btn-danger-outline" id="stop" style="flex: 1 1 0; min-height: 44px" disabled>끝내기</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>진행 상황</h2>
+        <div class="grid2">
+          <div class="tile"><div class="k">합친 지도에서 탐색한 넓이</div><div class="v" id="known">—</div></div>
+          <div class="tile"><div class="k">합쳐진 로봇 지도</div><div class="v" id="merged">—</div></div>
+        </div>
+        <div class="muted" style="font-size: 12px">로봇별 기여 (각자 그린 넓이)</div>
+        <div class="col" style="gap: 6px" id="contrib"><div class="empty">시작하면 표시됩니다</div></div>
+      </section>
+
+      <section class="panel">
+        <h2>조종 <span class="muted" style="font-weight: 400; font-size: 12px">자동 탐색이 아닐 때</span></h2>
+        <label class="field">조종할 로봇 <select id="drive-robot"></select></label>
+        <div class="pad">
+          <div></div><button data-dir="f" aria-label="전진">▲</button><div></div>
+          <button data-dir="l" aria-label="좌회전">◀</button><button class="stop" data-dir="stop" aria-label="정지">정지</button><button data-dir="r" aria-label="우회전">▶</button>
+          <div></div><button data-dir="b" aria-label="후진">▼</button><div></div>
+        </div>
+        <label class="field"><span class="line">속도 <b id="spd-val"></b></span><input type="range" id="spd" min="0.2" max="1" step="0.05" value="0.5"></label>
+        <div class="muted" style="font-size: 12px"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · 정지 <kbd>Space</kbd> · 여러 사람이 각자 다른 로봇을 조종해도 됩니다 (조종 권한).</div>
+      </section>
+
+      <section class="panel">
+        <h2>저장</h2>
+        <div style="display: flex; gap: 8px">
+          <input id="map-name" placeholder="lab" aria-label="지도 이름" style="flex: 1 1 auto; min-width: 0">
+          <button class="btn btn-primary" id="save" disabled>합친 지도 저장</button>
+        </div>
+        <label class="muted" style="font-size: 12px; display: flex; gap: 6px; align-items: center"><input type="checkbox" id="make-active" checked> 저장한 지도를 활성(기준) 지도로 — 이동 구역·Nav2·경비 기준</label>
+        <div id="saved" class="col" style="gap: 6px"></div>
+      </section>
     </aside>
 
     <section class="panel" style="flex: 3 1 560px; padding: 0; gap: 0">
       <div class="panel-head" style="padding: 12px 16px; border-bottom: 1px solid var(--line)">
-        <h2>만들어지는 지도</h2>
-        <span class="muted mono" style="font-size: 12px" id="map-stat">—</span>
+        <h2>합쳐진 지도</h2>
+        <span class="muted mono" style="font-size: 12px" id="map-stat">/map_merged</span>
         <div class="spacer"></div>
-        <button class="btn btn-icon" id="follow-btn" aria-pressed="true" aria-label="로봇 따라가기" title="로봇 따라가기">◎</button>
+        <button class="btn btn-sm" id="fit">전체 보기</button>
       </div>
-      <div class="view" id="view" style="height: 620px">
-        <canvas id="canvas" role="img" aria-label="SLAM 으로 만들어지는 지도와 로봇 위치"></canvas>
+      <div class="view" id="view" style="height: 680px">
+        <canvas id="canvas" role="img" aria-label="여러 로봇이 함께 그리는 지도와 로봇 위치"></canvas>
         <div class="zoom"><button id="zoom-in" aria-label="확대">+</button><button id="zoom-out" aria-label="축소">−</button></div>
       </div>
     </section>

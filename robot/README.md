@@ -19,8 +19,9 @@
 5. [웹에 등록](#5-웹에-등록)
 6. [자동 실행 (선택)](#6-부팅-시-자동-실행-선택)
 7. [Nav2 · 공유 지도](#7-nav2--공유-지도)
-8. [문제 해결](#8-문제-해결)
-9. [점검표](#9-점검표)
+8. [함께 지도 만들기 · 경비](#8-함께-지도-만들기--경비)
+9. [문제 해결](#9-문제-해결)
+10. [점검표](#10-점검표)
 
 ---
 
@@ -55,6 +56,11 @@ flowchart LR
 | [`tb3_ns.launch.py`](tb3_ns.launch.py) | TurtleBot3 | `robot.launch.py namespace:=X` + TF 를 `/X/tf` 로 분리 (Nav2 네임스페이스 모드와 맞춤) |
 | [`pinky_ns.launch.py`](pinky_ns.launch.py) | Pinky Pro | Pinky bringup + LED·표정 서버를 `/X` 아래로, TF 를 `/X/tf` 로 분리 |
 | [`nav2_ns.launch.py`](nav2_ns.launch.py) | PC | 로봇 1대의 Nav2 를 네임스페이스로 실행 (파라미터의 프레임·토픽을 로봇에 맞게 자동 수정) |
+| [`mapping_ns.launch.py`](mapping_ns.launch.py) | PC (웹이 실행) | 로봇 1대의 slam_toolbox (네임스페이스, `map_frame` 지정 가능) |
+| [`coop_mapping.launch.py`](coop_mapping.launch.py) | PC (웹이 실행) | 여러 로봇 함께 지도 만들기: 로봇별 slam + 합치기 + (선택) 로봇별 Nav2·explore_lite |
+| [`map_merge_node.py`](map_merge_node.py) | PC | 로봇별 `<ns>/map` 을 시작 위치로 합쳐 `/map_merged` 로 발행 |
+| [`patrol_node.py`](patrol_node.py) | PC (웹이 경비 모드에서 실행) | 순찰 + 스캔/기준 지도 비교 + 경보 |
+| [`nav2_params.py`](nav2_params.py) | — | Nav2 파라미터 고치기 공용 함수 (위 launch 들이 씀) |
 
 **네임스페이스 이름 규칙**: 영문자로 시작하고 영문·숫자·`_` 만 씁니다 (`tb3_01` ○, `tb3-01` ✕, `1tb3` ✕). 로봇마다 달라야 합니다.
 
@@ -396,14 +402,10 @@ pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky
 
 Pinky 의 로봇 크기·속도에 맞는 Nav2 파라미터는 아직 따로 만들지 않았습니다 (burger.yaml 을 그대로 씀). 실제 Pinky 에서 `robot_radius`, 최대 속도 등을 맞추는 것을 권합니다.
 
-### 7-4. 지도 작성 (처음 한 번, 로봇 한 대)
+### 7-4. 지도 만들기
 
-웹의 **지도 작성** 화면이 PC 에서 [`mapping_ns.launch.py`](mapping_ns.launch.py) (slam_toolbox, 그 로봇의 네임스페이스) 를 실행합니다.
-로봇은 위처럼 네임스페이스 bringup 만 되어 있으면 됩니다 (Nav2 는 지도 작성 중에 띄우지 않음).
-
-- 지도는 `/<ns>/map` 으로 나오고, map → `<접두사>odom` TF 는 그 로봇의 TF 토픽으로 나갑니다.
-- 저장하면 `config/maps/<이름>.yaml|pgm` 이 생기고, 활성 지도로 지정할 수 있습니다.
-- 직접 실행: `pixi run ros2 launch ros2-fleet-console/robot/mapping_ns.launch.py namespace:=tb3_01 frame_prefix:=tb3_01/ tf_topic:=/tb3_01/tf`
+웹의 **지도 만들기** 화면이 여러 로봇으로 함께 지도를 그립니다 (로봇 한 대만 골라도 됨). 자세한 내용은 [8-1](#8-1-함께-지도-만들기).
+로봇은 위처럼 네임스페이스 bringup 만 되어 있으면 됩니다. 이미 띄운 Nav2(`nav2_ns`)는 지도 만들기 동안 꺼 두세요 (AMCL 의 map TF 와 겹침).
 
 ### 7-5. 이동 구역 (Nav2 keepout)
 
@@ -421,7 +423,54 @@ Pinky 의 로봇 크기·속도에 맞는 Nav2 파라미터는 아직 따로 만
 
 ---
 
-## 8. 문제 해결
+## 8. 함께 지도 만들기 · 경비
+
+### 8-1. 함께 지도 만들기
+
+```mermaid
+flowchart LR
+    subgraph R1["/tb3_01"]
+      S1["slam_toolbox<br/>map_frame: tb3_01/map"] --> M1["/tb3_01/map"]
+    end
+    subgraph R2["/pinky_01"]
+      S2["slam_toolbox<br/>map_frame: pinky_01/map"] --> M2["/pinky_01/map"]
+    end
+    M1 & M2 --> MM["map_merge_node<br/>(시작 위치로 맞춤)"]
+    MM --> MG["/map_merged<br/>/map_merged/stats"]
+    MG --> W["웹 지도 만들기 화면"]
+    MG --> SV["저장: map_saver_cli -t /map_merged"]
+```
+
+- 로봇마다 slam_toolbox 를 그 네임스페이스로 띄우고, 지도 프레임을 `<ns>/map` 으로 나눕니다 (같은 `map` 을 쓰면 TF 가 겹침).
+- 합치기는 **시작 위치**(첫 로봇 기준 x, y, 각도)를 그대로 씁니다. 로봇들을 내려놓은 위치를 줄자로 재서 웹에 넣으세요. 각도가 몇 도만 틀려도 먼 벽이 두 겹으로 보입니다.
+- 칸 합치기 규칙: 어느 로봇이든 벽(≥65)이라고 하면 벽, 아니면 누군가 비었다(<25)고 하면 빈 칸.
+- **자동 탐색**을 켜면 로봇마다 Nav2(`navigation_launch`, 지도 = 그 로봇의 slam 지도) 와 explore_lite 가 뜹니다. TF 가 전역 `/tf` 인 로봇은 건너뜁니다 (로그에 표시).
+- 직접 실행:
+  ```bash
+  pixi run ros2 launch ros2-fleet-console/robot/coop_mapping.launch.py \
+    robots:='[{"ns":"tb3_01","prefix":"tb3_01/","tf":"/tb3_01/tf","type":"turtlebot3","x":0,"y":0,"yaw":0},
+              {"ns":"pinky_01","prefix":"","tf":"/pinky_01/tf","type":"pinky","x":-1.5,"y":0,"yaw":0}]' explore:=false
+  ```
+- explore_lite 는 `ros2_ws/src/m-explore-ros2` 를 빌드한 것이며, 도착한 frontier 를 다시 보내지 않도록 한 줄 고쳤습니다 (`explore.cpp`, `local patch` 주석). 이 패치가 없으면 goal 허용 오차 안의 frontier 를 1초에 수십 번 다시 보내며 멈춰 있습니다.
+
+### 8-2. 경비 (patrol_node)
+
+웹에서 모드를 **경비**로 바꾸면 PC 에서 `patrol_node.py` 가 뜹니다 (로그 `logs/patrol.log`). 로봇마다 필요한 것:
+
+| 필요 | 이유 |
+| --- | --- |
+| 기준 지도로 띄운 Nav2 (`nav2_ns.launch.py map:=<활성 지도>`) + 초기 위치 | 순찰(`<ns>/follow_waypoints`)과 확인 이동(`<ns>/navigate_to_pose`), 그리고 `map → base` TF |
+| `<ns>/scan` | 기준 지도와 비교 |
+| 순찰 경로 (경비 화면에서 저장) | 없으면 상태가 "경로 없음"이고 제자리에서 감시만 함 |
+
+- 로봇마다 TF 토픽을 따로 받으려고 내부 노드를 로봇마다 하나씩 둡니다 (`/patrol_<id>`).
+- 명령 토픽 `/fleet/patrol_cmd` (std_msgs/String, JSON): `{"cmd":"pause|resume","robot":"<id>|*"}`, `{"cmd":"inspect","robot":"<id>","x":..,"y":..}` (경보 0.6 m 앞까지 갔다가 순찰로 돌아감). 웹의 전체 비상정지는 `pause` / `*` 를 보냅니다.
+- 상태 토픽 `/fleet/patrol_status` (1초), 경보 토픽 `/fleet/alerts` (`{"event":"new|update","alert":{…}}`).
+- 서버는 경비 모드인데 patrol_node 가 죽어 있으면 5초 안에 다시 띄웁니다 (연달아 죽으면 최대 60초 간격).
+
+---
+
+## 9. 문제 해결
 
 | 증상 | 원인 · 해결 |
 | --- | --- |
@@ -437,10 +486,15 @@ Pinky 의 로봇 크기·속도에 맞는 Nav2 파라미터는 아직 따로 만
 | Nav2 가 "Waiting on external lifecycle transitions" 에서 안 넘어감 | AMCL 초기 위치가 없음 → 웹 플릿 화면에서 **초기 위치** 지정. 로봇 TF 토픽이 `<ns>/tf` 인지(`tb3_ns`/`pinky_ns` 사용) 확인 |
 | 같은 네임스페이스로 두 대를 띄움 | 토픽이 섞여 두 로봇이 같이 움직일 수 있음. 즉시 한 대를 끄고 네임스페이스를 다르게 |
 | `tb3-01` 같은 이름이 거부됨 | ROS 이름에는 `-` 를 쓸 수 없음 → `tb3_01` |
+| 합친 지도에 벽이 두 겹 | 지도 만들기의 시작 위치(특히 각도)가 실제와 다름. 끝내고 위치를 다시 재서 시작 |
+| 자동 탐색이 시작 안 됨 | `logs/mapping.log` 에서 `Managed nodes are active` 확인. 그 로봇 TF 토픽이 `/tf` 면 건너뜀. explore 가 `No frontiers found` 면 더 갈 곳이 없음 |
+| 경비 상태가 "Nav2 없음" | 그 로봇의 Nav2 가 안 떠 있음 (`<ns>/follow_waypoints` 없음) |
+| 경비 상태 위치 추정 "안 됨" | `map → <접두사>base_footprint` TF 없음 → 초기 위치 지정 |
+| 경보가 너무 많음 | 경비 화면 → 감지 설정에서 `연속으로 보여야 하는 스캔`, `최소 크기`, `벽 근처 여유`를 올림. 실제로 바뀐 것은 **기준 지도에 반영** |
 
 ---
 
-## 9. 점검표
+## 10. 점검표
 
 로봇을 새로 추가할 때:
 
@@ -453,3 +507,4 @@ Pinky 의 로봇 크기·속도에 맞는 Nav2 파라미터는 아직 따로 만
 - [ ] `fleet.html` 에서 카드가 "대기", 배터리 표시
 - [ ] 바닥에 내려놓고 로봇 대시보드에서 저속으로 짧게 조종 → 손 떼면 정지
 - [ ] 전체 비상정지(`Esc`) 로 멈추는지 확인
+- [ ] (경비에 쓸 로봇) 기준 지도로 Nav2 를 띄우고, 경비 화면 순찰 상태에서 위치 추정 "됨" 확인

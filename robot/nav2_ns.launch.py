@@ -18,11 +18,9 @@ Nav2 는 네임스페이스 모드에서 /tf 를 <ns>/tf 로 읽으므로, 로�
 그 다음 웹 플릿 화면에서 로봇을 고르고 [초기 위치] 로 AMCL 초기 자세를 준 뒤 목표를 지정합니다.
 """
 
-import copy
 import os
-import tempfile
+import sys
 
-import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, LogInfo
@@ -31,64 +29,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..'))
-FRAMES = {'odom', 'base_link', 'base_footprint', 'base_scan', 'rplidar_link'}
-KEEPOUT_INFO = 'keepout_costmap_filter_info'
-KEEPOUT_MASK = 'keepout_filter_mask'
-
-
-def keepout_topics(ns):
-    """costmap 노드는 /<ns>/global_costmap 안에 있어 상대 이름이 그 아래로 풀리므로 절대 이름을 씀"""
-    base = f'/{ns}' if ns else ''
-    return f'{base}/{KEEPOUT_INFO}', f'{base}/{KEEPOUT_MASK}'
-
-
-def rewrite_params(src, prefix, stamped, keepout, ns=''):
-    """Return (path of a rewritten copy of the Nav2 params file, list of changes)."""
-    with open(src, encoding='utf-8') as f:
-        data = yaml.safe_load(f)
-    changes = []
-
-    def walk(node, path):
-        if isinstance(node, dict):
-            for k, v in list(node.items()):
-                p = f'{path}.{k}' if path else k
-                if isinstance(v, (dict, list)):
-                    walk(v, p)
-                    continue
-                key = str(k)
-                if key == 'enable_stamped_cmd_vel':
-                    node[k] = stamped
-                    changes.append((p, v, stamped))
-                elif isinstance(v, str) and (key.endswith('frame') or key.endswith('frame_id')) and v in FRAMES and prefix:
-                    node[k] = prefix + v
-                    changes.append((p, v, node[k]))
-                elif isinstance(v, str) and ('topic' in key) and v.startswith('/'):
-                    node[k] = v.lstrip('/')
-                    changes.append((p, v, node[k]))
-        elif isinstance(node, list):
-            for i, v in enumerate(node):
-                walk(v, f'{path}[{i}]')
-
-    walk(data, '')
-
-    if keepout:
-        # 전역·지역 costmap 모두에 KeepoutFilter (지역 costmap 에도 넣어야 제어기가 구역 안으로 들어가지 않음)
-        for cm in ('global_costmap', 'local_costmap'):
-            p = data.get(cm, {}).get(cm, {}).get('ros__parameters')
-            if p is None:
-                continue
-            filters = list(p.get('filters', []))
-            if 'keepout_filter' not in filters:
-                filters.append('keepout_filter')
-            p['filters'] = filters
-            p['keepout_filter'] = {'plugin': 'nav2_costmap_2d::KeepoutFilter', 'enabled': True,
-                                   'filter_info_topic': keepout_topics(ns)[0]}
-            changes.append((f'{cm}.filters', None, filters))
-
-    fd, out = tempfile.mkstemp(prefix='nav2_ns_', suffix='.yaml')
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        yaml.safe_dump(data, f, sort_keys=False)
-    return out, changes
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from nav2_params import keepout_topics, rewrite_params  # noqa: E402
 
 
 def resolve_map(arg):

@@ -336,7 +336,11 @@ stateDiagram-v2
 ros2-fleet-console/
 ├── README.md
 ├── config/
-│   └── fleet.json           로봇 목록 (setup.html 에서 저장)
+│   ├── fleet.json           로봇 목록 + 활성 지도 (setup.html·지도 화면에서 저장)
+│   ├── mode.json            운영 모드
+│   ├── maps/ zones/ masks/  지도 · 이동 구역 · 로봇별 keepout 마스크
+│   └── patrol/<지도>.json   순찰 경로 + 감지 설정
+├── data/alerts.db           경보 (SQLite)
 ├── docs/
 │   ├── architecture.md      ← 이 문서
 │   └── test-report.md       로봇 없이 한 시험 결과
@@ -347,24 +351,31 @@ ros2-fleet-console/
 │   ├── tb3_ns.launch.py     TurtleBot3 네임스페이스 + TF 분리 (로봇에서 실행)
 │   ├── pinky_ns.launch.py   Pinky Pro 네임스페이스 + TF 분리 (로봇에서 실행)
 │   ├── nav2_ns.launch.py    로봇별 Nav2 + keepout 필터 (PC 에서 실행)
-│   └── mapping_ns.launch.py 로봇 한 대 slam_toolbox (PC, 웹 지도 작성이 실행)
-├── serve.py                 정적 파일 + /api/fleet · control · maps · zones · mapping
-├── maps.py                  지도·구역·마스크·지도 작성 프로세스
+│   ├── nav2_params.py       Nav2 파라미터 고치기 공용 함수
+│   ├── mapping_ns.launch.py 로봇 한 대 slam_toolbox
+│   ├── coop_mapping.launch.py 여러 로봇 함께 지도 만들기 (PC, 웹이 실행)
+│   ├── map_merge_node.py    로봇별 지도 합치기 → /map_merged
+│   └── patrol_node.py       경비: 순찰 + 변화 감지 + 경보 (PC, 웹이 실행)
+├── serve.py                 정적 파일 + /api/* + 경비 감시(재시작)
+├── maps.py                  지도·구역·마스크·기준 지도 반영, 지도 만들기·경비 프로세스
+├── patrol_store.py          모드 · 순찰 설정 · 경보 DB
 └── web/
     ├── fleet.html           플릿
     ├── index.html           로봇 대시보드
     ├── interfaces.html      ROS 2 인터페이스
     ├── mobile.html          모바일 조종
     ├── setup.html           로봇 등록
-    ├── mapping.html         지도 작성
+    ├── mapping.html         지도 만들기 (여러 로봇)
     ├── zones.html           이동 구역
+    ├── patrol.html          경비 (경보 · 순찰 경로 · 감지 설정)
+    ├── alerts.html          경보 (모바일)
     ├── css/app.css
     └── js/
         ├── ros.js           rosbridge 클라이언트
         ├── robot.js         프로필 · Robot · Pose2
         ├── common.js        공통 (window.App)
         ├── view.js          캔버스 뷰
-        ├── fleet.js, dashboard.js, interfaces.js, mobile.js, setup.js
+        ├── fleet.js, dashboard.js, interfaces.js, mobile.js, setup.js, mapping.js, zones.js, patrol.js
 ```
 
 관련 설정: `pixi.toml` 의 `ros-jazzy-rosbridge-suite` 의존성과 `web` 태스크.
@@ -536,7 +547,94 @@ costmap 노드는 `/<ns>/global_costmap` 안에 있어 상대 토픽 이름이 �
 | `GET /api/maps/<이름>.png` | — | 지도 이미지 (웹 색, 미탐색 투명) |
 | `GET /api/zones/<이름>` | — | 구역 |
 | `PUT /api/zones/<이름>` | 필요 | 구역 저장 + 로봇별 마스크 생성 (구역 64개, 점 200개 이하) |
-| `GET /api/mapping` | — | 지도 작성 상태 |
-| `POST /api/mapping/start` `{robot}` | 필요 | slam_toolbox 시작 (한 번에 한 로봇) |
-| `POST /api/mapping/save` `{name}` | 필요 | `map_saver_cli` 로 저장, yaml 의 image 를 상대 경로로 |
+| `GET /api/mapping` | — | 지도 만들기 상태 (로봇·시작 위치·자동 탐색) |
+| `POST /api/mapping/start` `{robots:[{id,x,y,yaw}], explore}` | 필요 | `coop_mapping.launch.py` 시작 |
+| `POST /api/mapping/save` `{name}` | 필요 | `map_saver_cli -t /map_merged` 로 저장, yaml 의 image 를 상대 경로로 |
 | `POST /api/mapping/stop` | 필요 | 프로세스 그룹 종료 (serve.py 종료 때도 자동) |
+
+경비 관련 API 는 [12. 운영 모드 · 함께 지도 만들기 · 경비](#12-운영-모드--함께-지도-만들기--경비) 참고.
+
+---
+
+## 12. 운영 모드 · 함께 지도 만들기 · 경비
+
+### 모드
+
+```mermaid
+stateDiagram-v2
+    state "운영" as operate
+    state "지도 만들기" as mapping
+    state "경비" as patrol
+    [*] --> operate
+    operate --> mapping: 지도 화면에서 시작
+    mapping --> operate: 끝내기
+    operate --> patrol: 활성 지도 있음
+    patrol --> operate: 모드 칩
+    mapping --> patrol: 지도 만들기 정지
+    patrol --> mapping: 경비 정지
+```
+
+- `config/mode.json` 에 저장. 서버를 다시 켜면 경비는 이어서, 지도 만들기는 운영으로 돌아갑니다.
+- 모드 바꾸기는 관리자 토큰 필요. 경비로 갈 때 서버가 `patrol_node` 를 띄우고, 다른 모드로 가면 끕니다.
+- `patrol_watchdog` 스레드: 경비 모드인데 프로세스가 죽어 있으면 다시 띄움(5초 → 최대 60초 간격). `/api/mode` 의 `patrol.restarts` 로 보이고, 모드 칩이 "감지 멈춤"으로 바뀝니다.
+
+### 함께 지도 만들기
+
+```mermaid
+flowchart LR
+    W["mapping.html<br/>로봇 + 시작 위치"] -->|"POST /api/mapping/start"| S["serve.py"]
+    S -->|"ros2 launch coop_mapping<br/>robots:=JSON explore:=…"| L["coop_mapping.launch.py"]
+    L --> SL1["slam_toolbox /tb3_01<br/>map_frame tb3_01/map"]
+    L --> SL2["slam_toolbox /pinky_01<br/>map_frame pinky_01/map"]
+    L --> MM["map_merge_node"]
+    L -.->|"explore:=true"| NV["로봇별 Nav2 navigation<br/>+ explore_lite"]
+    SL1 & SL2 -->|"&lt;ns&gt;/map"| MM
+    MM -->|"/map_merged (PNG 2초)<br/>/map_merged/stats"| W
+```
+
+- 웹은 로봇의 합친 지도 위 자세를 `시작 위치 ∘ (<ns>/map → odom, 그 로봇 TF 토픽) ∘ odom` 으로 계산합니다.
+- `navigation_launch.py` 는 네임스페이스를 직접 씌우지 않으므로 `PushROSNamespace` 로 감쌉니다 (안 그러면 노드가 `/` 에 떠서 파라미터를 못 찾음 → `No critics defined for FollowPath`).
+
+### 경비 (patrol_node)
+
+```mermaid
+flowchart TB
+    subgraph PN["patrol_node.py (PC)"]
+        RW1["RobotWatch tb3_01<br/>/tf:=/tb3_01/tf"]
+        RW2["RobotWatch pinky_01<br/>/tf:=/pinky_01/tf"]
+        CORE["PatrolNode<br/>기준 지도 · 설정 다시 읽기(5초)<br/>경보 합치기 · 등급"]
+    end
+    SC["&lt;ns&gt;/scan"] --> RW1 & RW2
+    RW1 & RW2 -->|"새/사라진 칸 → 덩어리"| CORE
+    CORE --> DB[("data/alerts.db")]
+    CORE -->|"/fleet/alerts"| UI["모든 웹 화면<br/>토스트 · 소리 · 알림"]
+    CORE -->|"/fleet/patrol_status"| PT["patrol.html"]
+    PT -->|"/fleet/patrol_cmd<br/>pause · resume · inspect"| CORE
+    RW1 & RW2 -->|"follow_waypoints · navigate_to_pose"| NAV["로봇별 Nav2"]
+```
+
+감지 (스캔마다, 0.4초 간격):
+
+| 단계 | 내용 |
+| --- | --- |
+| 1. 자세 | `map → 스캔 프레임` TF (로봇의 TF 토픽). 없으면 "위치 추정 안 됨" |
+| 2. 새로 생긴 것 | 끝점이 기준 지도의 빈 칸이고, 벽에서 `tol` 이상 |
+| 3. 사라진 것 | 빛줄기를 따라가며 기준 지도 벽 칸을 지나면 그 칸. 끝점 앞 여유는 표면에서 수직으로 `tol + 칸` (= 빛줄기 따라 `÷ sin(입사각)`). 입사각은 이웃 빛 끝점을 이은 선으로 추정, 25° 미만은 제외. `max_range` 보다 멀리서 돌아온 빛도 그 거리까지는 증거로 씀 (반사 없음 inf 는 제외) |
+| 4. 확정 | 칸마다 `persist` 번 이상, 최근 2초 안에 본 것. `decay` 초 안 보이면 잊음 |
+| 5. 덩어리 | 8방향 이웃으로 묶음. 넓이 = 감싸는 상자(두께 최소 0.1 m), `min_area` 미만·3칸 미만은 버림 |
+| 6. 경보 | 0.5 m 안 같은 종류의 열린 경보가 있으면 갱신(상자 합치기 ≤2 m, 로봇·횟수), 30분 안에 처리한 곳이면 무시, 아니면 새 경보 + 주변 스캔 점(≤400) 저장 |
+
+순찰: 로봇마다 경로가 있으면 `follow_waypoints` 로 한 바퀴씩 반복(바퀴 수). `inspect` 는 순찰을 취소하고 경보에서 로봇 쪽으로 0.6 m 떨어진 곳으로 `navigate_to_pose`, 끝나면 순찰로 돌아갑니다. Nav2 가 없으면 30초 동안 "Nav2 없음"으로 기다립니다.
+
+### 경비 API
+
+| 요청 | 토큰 | 내용 |
+| --- | --- | --- |
+| `GET /api/mode` | — | 모드 + 지도 만들기·경비 프로세스 상태 |
+| `POST /api/mode` `{mode}` | 필요 | `operate` / `mapping` / `patrol` |
+| `GET /api/patrol/<지도>` | — | 순찰 경로 + 감지 설정 |
+| `PUT /api/patrol/<지도>` | 필요 | 저장 (로봇마다 점 100개 이하, 설정 범위 검사) |
+| `GET /api/alerts?map=&status=&limit=&since=` | — | 경보 목록 + 개수 |
+| `GET /api/alerts/<id>` | — | 경보 (발견 당시 스캔 점 포함) |
+| `POST /api/alerts/<id>` `{status}` | — (같은 출처) | `ok` 이상 없음 / `false` 오탐 / `open` 다시 열기 |
+| `POST /api/alerts/<id>/baseline` | 필요 | 기준 지도에 반영 (새 → 벽, 사라진 → 빈 칸 + 붙어 있던 나머지 0.5 m 안), 원본 `.bak` |

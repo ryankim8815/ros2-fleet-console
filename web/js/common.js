@@ -187,8 +187,12 @@
   function estop() {
     activeGoals.forEach((g) => g.cancel());
     robots.forEach((r) => r.halt());
+    // 경비 중이면 순찰 goal 은 서버의 patrol_node 가 보낸 것이라 위에서 취소되지 않음 → 모든 로봇 순찰 멈춤
+    // (경비가 아니면 받는 노드가 없어 아무 일도 없음)
+    ros.publish('/fleet/patrol_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'pause', robot: '*' }) });
+    const patrolling = document.querySelector('#mode-chip')?.dataset.mode === 'patrol';
     document.dispatchEvent(new CustomEvent('tb3:estop'));
-    toast(`비상정지: 로봇 ${robots.length}대에 정지 명령을 보내고 진행 중인 goal 을 취소했습니다`, 'danger');
+    toast(`비상정지: 로봇 ${robots.length}대에 정지 명령을 보내고 진행 중인 goal 을 취소했습니다${patrolling ? ' (순찰도 멈춤 — 경비 화면에서 재개)' : ''}`, 'danger');
   }
 
   // ---------- 상단바 ----------
@@ -248,8 +252,122 @@
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape') estop(); });
   }
 
+  // ---------- 운영 모드 (운영 / 지도 만들기 / 경비) + 경보 배지 — 모든 페이지 상단 ----------
+  const MODE_LABEL = { operate: '운영', mapping: '지도 만들기', patrol: '경비' };
+  let modeState = { mode: 'operate' };
+  let openAlerts = 0;
+  function modeWidget() {
+    const bar = $('.topbar') || $('header');
+    if (!bar || $('#mode-chip')) return;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display: flex; gap: 8px; align-items: center';
+    wrap.innerHTML = '<button class="mode-chip" id="mode-chip" title="운영 모드 바꾸기">모드 —</button>'
+      + '<a class="alert-chip hidden" id="alert-chip" href="patrol.html" title="확인 안 한 경보"></a>';
+    const spacer = bar.querySelector('.spacer');
+    if (spacer) bar.insertBefore(wrap, spacer); else bar.appendChild(wrap);
+    $('#mode-chip').addEventListener('click', openModeDialog);
+  }
+  function renderMode() {
+    const c = $('#mode-chip');
+    if (c) {
+      // 경비 모드인데 감지 프로세스가 멈춰 있으면(서버가 다시 띄우는 중) 경고로 보여 줌
+      const down = modeState.mode === 'patrol' && modeState.patrol && !modeState.patrol.running;
+      c.textContent = `모드 · ${MODE_LABEL[modeState.mode] || modeState.mode}${down ? ' · 감지 멈춤' : ''}`;
+      c.dataset.mode = modeState.mode;
+      c.classList.toggle('down', !!down);
+      c.title = down ? '경비 감지(patrol_node)가 멈췄습니다. 서버가 자동으로 다시 시작합니다. logs/patrol.log 확인' : '클릭하여 모드 변경';
+    }
+    const a = $('#alert-chip');
+    if (a) { a.textContent = `확인 안 한 경보 ${openAlerts}`; a.classList.toggle('hidden', !openAlerts); }
+    document.dispatchEvent(new CustomEvent('tb3:mode', { detail: modeState }));
+  }
+  async function pollMode() {
+    try {
+      modeState = await (await fetch('/api/mode', { cache: 'no-store' })).json();
+      if (fleet.mapFile) {
+        const r = await (await fetch(`/api/alerts?map=${encodeURIComponent(fleet.mapFile)}&status=open&limit=1`, { cache: 'no-store' })).json();
+        openAlerts = (r.counts && r.counts.open) || 0;
+      }
+      renderMode();
+    } catch (e) { /* serve.py 없이 열었을 때 */ }
+  }
+  // 경비 중 새 경보: 토스트 + 소리 + (허용했으면) 브라우저 알림
+  function alertNotify(a) {
+    const kind = a.kind === 'new' ? '새로 생긴 것' : '사라진 것';
+    const who = (a.robots || []).map((id) => (robots.find((r) => r.id === id) || { name: id }).name).join(', ');
+    toastAction(`경보 #${a.id} · ${kind} (${a.x.toFixed(1)}, ${a.y.toFixed(1)}) · ${who}`, '보기', () => { location.href = `patrol.html#alert-${a.id}`; }, 'danger', 8000);
+    try {
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ac.createOscillator(); const g = ac.createGain();
+      o.frequency.value = 880; g.gain.value = 0.08; o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + 0.25);
+    } catch (e) { /* 소리 불가 */ }
+    // 사용자가 화면을 한 번도 누르지 않았으면 브라우저가 막고 콘솔 오류를 남기므로 그때는 건너뜀
+    if (navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive)) navigator.vibrate([150, 80, 150]);
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try { new Notification(`경보 #${a.id}: ${kind}`, { body: `${who} · (${a.x.toFixed(1)}, ${a.y.toFixed(1)})`, tag: `alert-${a.id}` }); } catch (e) { /* ignore */ }
+    }
+  }
+  function watchAlerts() {
+    ros.subscribe('/fleet/alerts', 'std_msgs/msg/String', (m) => {
+      let ev;
+      try { ev = JSON.parse(m.data); } catch (e) { return; }
+      document.dispatchEvent(new CustomEvent('tb3:alert', { detail: ev }));
+      if (ev.event === 'new') { openAlerts += 1; renderMode(); alertNotify(ev.alert); }
+    }, { queue: 20 });
+  }
+
+  async function openModeDialog() {
+    let dlg = $('#mode-dialog');
+    if (!dlg) {
+      dlg = document.createElement('dialog');
+      dlg.id = 'mode-dialog';
+      dlg.className = 'mode-dialog';
+      document.body.appendChild(dlg);
+    }
+    const maps = await (await fetch('/api/maps', { cache: 'no-store' })).json().catch(() => []);
+    let routes = 0;
+    if (fleet.mapFile) {
+      try { const p = await (await fetch(`/api/patrol/${encodeURIComponent(fleet.mapFile)}`)).json(); routes = Object.values(p.routes || {}).filter((r) => r.enabled && r.points.length).length; } catch (e) { /* ignore */ }
+    }
+    const online = robots.filter((r) => r.online).length;
+    const chk = (ok, text, sub) => `<div class="check"><span class="${ok ? 'ok' : 'unk'}">${ok ? '✓' : '!'}</span><span>${esc(text)}${sub ? `<span class="muted" style="display: block; font-size: 11px">${esc(sub)}</span>` : ''}</span><span></span></div>`;
+    const cur = modeState.mode;
+    const opt = (m, title, desc) => `<label class="mode-opt${m === cur ? ' cur' : ''}"><input type="radio" name="mode" value="${m}" ${m === cur ? 'checked' : ''}><span><b>${title}</b>${m === cur ? ' <span class="badge">지금</span>' : ''}<br><span class="muted" style="font-size: 12px">${desc}</span></span></label>`;
+    dlg.innerHTML = `<form method="dialog" class="col" style="gap: 12px">
+      <div class="panel-head" style="justify-content: space-between"><h2 style="font-size: 17px">운영 모드 바꾸기</h2><button value="cancel" class="btn btn-icon" aria-label="닫기">✕</button></div>
+      <div class="muted" style="font-size: 12px">지금: <b style="color: var(--text)">${MODE_LABEL[cur]}</b> · 로봇 ${robots.length}대 중 온라인 ${online}대</div>
+      ${opt('operate', '운영', '사람이 목표를 주고 조종합니다. 자동 동작 없음.')}
+      ${opt('mapping', '지도 만들기', '온라인 로봇이 함께 지도를 그립니다. 지도 만들기 화면에서 시작·저장합니다.')}
+      ${opt('patrol', '경비', '로봇들이 순찰 경로를 돌며 기준 지도와 다른 곳을 찾아 관제실에 알립니다.')}
+      <div class="col" style="gap: 6px; background: var(--bg); border-radius: 10px; padding: 10px" id="mode-checks">
+        <div class="muted" style="font-size: 12px">경비 시작 전 확인</div>
+        ${chk(!!fleet.mapFile, fleet.mapFile ? `기준 지도: ${fleet.mapFile}` : '기준(활성) 지도 없음', fleet.mapFile ? '' : '지도 만들기로 먼저 만드세요')}
+        ${chk(routes > 0, `순찰 경로 ${routes}개`, routes ? '' : '경비 화면 > 순찰 경로에서 지정 (없으면 감지만 함)')}
+        ${chk(online > 0, `온라인 로봇 ${online}대`, '로봇별 Nav2 와 위치 추정(초기 위치)이 필요합니다')}
+        ${chk(maps.length > 0, `저장된 지도 ${maps.length}개`, '')}
+      </div>
+      <div style="display: flex; gap: 8px"><button value="cancel" class="btn" style="flex: 1 1 0; min-height: 44px">취소</button>
+        <button value="ok" class="btn btn-primary" id="mode-ok" style="flex: 2 1 0; min-height: 44px">바꾸기</button></div>
+      <div class="muted" style="font-size: 11px; text-align: center">바꾸면 진행 중인 지도 만들기·경비 프로세스는 정지됩니다</div>
+    </form>`;
+    dlg.showModal();
+    dlg.onclose = async () => {
+      if (dlg.returnValue !== 'ok') return;
+      const m = (dlg.querySelector('input[name=mode]:checked') || {}).value;
+      if (!m || m === cur) return;
+      try {
+        modeState = await adminJson('/api/mode', { method: 'POST', body: JSON.stringify({ mode: m }) });
+        renderMode();
+        toast(`모드: ${MODE_LABEL[m]}`, 'ok');
+        if (m === 'mapping' && !location.pathname.endsWith('mapping.html')) location.href = 'mapping.html';
+        if (m === 'patrol' && !location.pathname.endsWith('patrol.html')) location.href = 'patrol.html';
+      } catch (e) { toast(`모드를 바꾸지 못했습니다: ${e.message}`, 'danger', 6000); }
+    };
+  }
+
   const App = {
     ros, store, $, $$, esc, fmt, toast, toastAction, estop, trackGoal, robotUrl, control,
+    get mode() { return modeState; }, openModeDialog, pollMode,
     get fleet() { return fleet; },
     get zones() { return zonesDoc; },
     loadZones, adminFetch, adminJson, setActiveMap,
@@ -265,6 +383,7 @@
       await loadFleet();
       await loadZones();
       bindHeader();
+      if (!document.body.dataset.noMode) { modeWidget(); pollMode(); setInterval(pollMode, 3000); watchAlerts(); }
       // 현재 로봇의 기본 상태 구독 (배터리 표시, 구역 판정용 지도 위치). 플릿 페이지는 직접 모든 로봇을 시작함
       if (!document.body.dataset.fleet) robot.start({ tf: true });
       robot.onChange(renderBattery);

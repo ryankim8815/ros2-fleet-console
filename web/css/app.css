@@ -175,6 +175,19 @@ kbd { font-family: var(--mono); color: var(--text); background: var(--raised); b
 .view .dist[data-level="warn"] { border-color: var(--warn); color: var(--warn); }
 .view .dist[data-level="bad"] { border-color: var(--danger); color: var(--danger-3); background: rgba(127, 29, 29, 0.85); }
 
+/* mode chip, alert chip, mode dialog */
+.mode-chip { border: 1px solid var(--line-2); background: var(--panel); color: var(--text); border-radius: 999px; padding: 6px 12px; font-size: 13px; min-height: 32px; font-weight: 600; }
+.mode-chip[data-mode="mapping"] { border-color: var(--accent); color: var(--accent-2); background: var(--accent-bg); }
+.mode-chip[data-mode="patrol"] { border-color: var(--warn); color: var(--warn); background: rgba(251, 191, 36, 0.12); }
+.mode-chip.down { border-color: var(--danger); color: var(--danger-2); background: rgba(248, 113, 113, 0.14); }
+.alert-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; background: rgba(220, 38, 38, 0.16); border: 1px solid var(--danger); color: var(--danger-3); font-weight: 700; font-size: 13px; text-decoration: none; }
+.alert-chip:hover { color: #fff; }
+.mode-dialog { width: min(440px, calc(100vw - 32px)); background: var(--panel); color: var(--text); border: 1px solid var(--line-2); border-radius: 16px; padding: 20px; }
+.mode-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.mode-opt { display: flex; gap: 12px; padding: 12px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--bg); cursor: pointer; }
+.mode-opt:has(input:checked) { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn); }
+.mode-opt input { margin-top: 3px; }
+
 /* top navigation */
 .topnav { display: flex; gap: 4px; flex-wrap: wrap; }
 .topnav a { text-decoration: none; }

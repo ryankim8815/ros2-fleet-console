@@ -111,7 +111,7 @@ window.App.ready.then((App) => {
     try { maps = await (await fetch('/api/maps', { cache: 'no-store' })).json(); } catch (e) { return; }
     const b = $('#map-banner');
     if (!maps.length) {
-      b.innerHTML = '<b>아직 지도가 없습니다.</b><span class="muted">로봇 한 대로 먼저 지도를 그리면 이동 구역과 여러 대의 Nav2 에 같은 지도를 씁니다.</span><a class="btn btn-primary" href="mapping.html" style="text-decoration: none">지도 작성 시작</a>';
+      b.innerHTML = '<b>아직 지도가 없습니다.</b><span class="muted">로봇 한 대로 먼저 지도를 그리면 이동 구역과 여러 대의 Nav2 에 같은 지도를 씁니다.</span><a class="btn btn-primary" href="mapping.html" style="text-decoration: none">지도 만들기 시작</a>';
       b.classList.remove('hidden');
     } else if (!App.fleet.mapFile) {
       b.innerHTML = `<b>활성 지도가 정해지지 않았습니다.</b><span class="muted">저장된 지도 ${maps.length}개 중 하나를 활성 지도로 지정하세요.</span><a class="btn" href="zones.html" style="text-decoration: none">지도 고르기</a>`;

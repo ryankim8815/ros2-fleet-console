@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E1116">
+<title>경보 · 모바일</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="css/app.css">
+<style>
+  .m { max-width: 480px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column; gap: 12px; padding: 16px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .m-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .card { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 14px; background: var(--raised); border: 1px solid var(--line-2); color: var(--text); text-align: left; width: 100%; }
+  .card[aria-pressed="true"] { border-color: var(--danger); }
+  .card.done { opacity: 0.55; }
+  .sev-high { color: var(--danger-2); } .sev-medium { color: var(--warn); } .sev-low { color: var(--blue-2); }
+  #mini { width: 100%; aspect-ratio: 16 / 10; display: block; border-radius: 14px; background: #202730; border: 1px solid var(--line); }
+  .big { min-height: 52px; border-radius: 14px; font-size: 15px; font-weight: 700; }
+  .tabbar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); margin: 0 -16px; padding-top: 6px; }
+  .tabbar a { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 0; color: var(--muted); text-decoration: none; font-size: 11px; }
+  .tabbar a[aria-current="page"] { color: var(--warn); font-weight: 600; }
+</style>
+</head>
+<body data-fleet="1">
+<div class="m">
+  <header class="m-head">
+    <div style="font-weight: 700; font-size: 18px">경보</div>
+    <button class="pill" data-conn="wait" style="font-size: 12px; min-height: 28px; padding: 4px 10px"><span class="dot"></span><span data-conn-text>연결 중…</span></button>
+  </header>
+  <div class="muted" style="font-size: 12px" id="sub"></div>
+  <label class="muted" style="font-size: 12px; display: flex; gap: 6px; align-items: center"><input type="checkbox" id="notif"> 이 기기에서 알림 받기 (화면이 켜져 있을 때)</label>
+
+  <div class="col" style="gap: 8px" id="list"><div class="empty">불러오는 중…</div></div>
+
+  <section class="col hidden" style="gap: 10px" id="detail">
+    <canvas id="mini" width="480" height="300" aria-label="경보 주변 기준 지도와 발견 당시 스캔"></canvas>
+    <div class="grid3" id="metrics"></div>
+    <button class="big" id="b-ok" style="border: 0; background: var(--ok); color: #0E1116">확인 · 이상 없음</button>
+    <div class="grid2">
+      <button class="btn" id="b-false" style="min-height: 48px">오탐</button>
+      <button class="btn" id="b-inspect" style="min-height: 48px">로봇 보내 다시 보기</button>
+    </div>
+  </section>
+
+  <div style="flex: 1 1 auto"></div>
+  <button class="big" data-estop style="border: 0; background: var(--danger); color: #fff">전체 비상정지</button>
+  <nav class="tabbar" aria-label="하단 메뉴">
+    <a href="alerts.html" aria-current="page">경보</a>
+    <a href="mobile.html">조종</a>
+    <a href="patrol.html">경비 (PC 화면)</a>
+  </nav>
+</div>
+<script src="js/ros.js"></script>
+<script src="js/robot.js"></script>
+<script src="js/common.js"></script>
+<script>
+window.App.ready.then(async (App) => {
+  const { ros, $, esc, toast } = App;
+  const robots = App.robots;
+  robots.forEach((r) => r.start({ tf: true, odomThrottle: 500 }));
+  const mapName = App.fleet.mapFile;
+  const KIND = { new: '새로 생긴 것', missing: '사라진 것' };
+  const SEV = { high: '높음', medium: '보통', low: '낮음' };
+  const STATUS = { open: '미확인', ok: '이상 없음', false: '오탐', baseline: '기준 반영' };
+  let alerts = [], lastHtml = '', sel = null, det = null, mapInfo = null, img = null;
+  if (!mapName) { $('#list').innerHTML = '<div class="empty">활성 지도가 없어 경비를 할 수 없습니다</div>'; return; }
+  const maps = await (await fetch('/api/maps')).json();
+  mapInfo = maps.find((m) => m.name === mapName);
+  if (mapInfo) { img = new Image(); img.src = `/api/maps/${encodeURIComponent(mapName)}.png?t=${mapInfo.mtime}`; await img.decode().catch(() => {}); }
+  const ago = (t) => { const s = Math.round(Date.now() / 1000 - t); return s < 60 ? `${s}초 전` : s < 3600 ? `${Math.floor(s / 60)}분 전` : `${Math.floor(s / 3600)}시간 전`; };
+  async function load() {
+    const r = await (await fetch(`/api/alerts?map=${encodeURIComponent(mapName)}&limit=50`, { cache: 'no-store' })).json();
+    alerts = r.alerts;
+    $('#sub').textContent = `기준 지도 ${mapName} · 모드 ${App.mode.mode === 'patrol' ? '경비' : App.mode.mode === 'mapping' ? '지도 만들기' : '운영'} · 미확인 ${r.counts.open}`;
+    const html = alerts.slice(0, 12).map((a) => `<button class="card ${a.status !== 'open' ? 'done' : ''}" data-id="${a.id}" aria-pressed="${a.id === sel}">
+      <b class="mono sev-${a.severity}">#${a.id}</b><span style="flex: 1 1 auto"><b>${KIND[a.kind]}</b> <span class="badge sev-${a.severity}">${SEV[a.severity]}</span><br><span class="muted" style="font-size: 12px">${esc(a.robots.map((id) => (robots.find((r) => r.id === id) || { name: id }).name).join(', '))} · ${ago(a.last_seen)} · ${STATUS[a.status]}</span></span></button>`).join('') || '<div class="empty">경보가 없습니다</div>';
+    if (html !== lastHtml) { $('#list').innerHTML = html; lastHtml = html; }   // 바뀔 때만 (누르는 중인 카드가 사라지지 않게)
+  }
+  async function open(id) {
+    sel = id; det = await (await fetch(`/api/alerts/${id}`)).json();
+    $('#detail').classList.remove('hidden');
+    $('#metrics').innerHTML = `<div class="tile"><div class="k">크기</div><div class="v" style="font-size: 14px">${det.area.toFixed(2)} m²</div></div><div class="tile"><div class="k">본 로봇</div><div class="v" style="font-size: 14px">${det.robots.length}대</div></div><div class="tile"><div class="k">상태</div><div class="v" style="font-size: 14px">${STATUS[det.status]}</div></div>`;
+    $('#b-ok').disabled = $('#b-false').disabled = det.status !== 'open';
+    draw(); load();
+  }
+  function draw() {
+    if (!img || !det) return;
+    const cv = $('#mini'), g = cv.getContext('2d'), res = mapInfo.resolution, H = mapInfo.height, R = 2.0;
+    const toPx = (x, y) => [(x - mapInfo.origin[0]) / res, H - (y - mapInfo.origin[1]) / res];
+    const [cx, cy] = toPx(det.x, det.y), sw = 2 * R / res, sh = sw * cv.height / cv.width, k = cv.width / sw;
+    g.fillStyle = '#161B22'; g.fillRect(0, 0, cv.width, cv.height); g.imageSmoothingEnabled = false;
+    g.drawImage(img, cx - sw / 2, cy - sh / 2, sw, sh, 0, 0, cv.width, cv.height);
+    const w2s = (x, y) => { const [px, py] = toPx(x, y); return [(px - (cx - sw / 2)) * k, (py - (cy - sh / 2)) * k]; };
+    g.fillStyle = '#E6EDF3'; for (const [x, y] of det.scan || []) { const [u, v] = w2s(x, y); g.fillRect(u - 1.5, v - 1.5, 3, 3); }
+    const [u0, v0] = w2s(det.x - det.w / 2, det.y + det.h / 2);
+    g.strokeStyle = det.kind === 'new' ? '#F87171' : '#FBBF24'; g.lineWidth = 3; g.setLineDash(det.kind === 'new' ? [] : [6, 4]);
+    g.strokeRect(u0 - 4, v0 - 4, det.w / res * k + 8, det.h / res * k + 8);
+  }
+  async function setStatus(st) {
+    const r = await fetch(`/api/alerts/${det.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: st }) });
+    if (!r.ok) { toast('실패', 'danger'); return; }
+    toast(`#${det.id}: ${STATUS[st]}`, 'ok'); open(det.id);
+  }
+  $('#list').addEventListener('click', (e) => { const b = e.target.closest('[data-id]'); if (b) open(Number(b.dataset.id)); });
+  $('#b-ok').addEventListener('click', () => setStatus('ok'));
+  $('#b-false').addEventListener('click', () => setStatus('false'));
+  $('#b-inspect').addEventListener('click', () => {
+    const c = robots.filter((r) => r.online && r.mapPose).sort((p, q) => Math.hypot(p.mapPose.x - det.x, p.mapPose.y - det.y) - Math.hypot(q.mapPose.x - det.x, q.mapPose.y - det.y));
+    if (!c.length) { toast('지도 위치를 아는 로봇이 없습니다', 'warn'); return; }
+    ros.publish('/fleet/patrol_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'inspect', robot: c[0].id, x: det.x, y: det.y }) });
+    toast(`${c[0].name} 를 보냈습니다`, 'ok');
+  });
+  $('#notif').checked = 'Notification' in window && Notification.permission === 'granted';
+  $('#notif').addEventListener('change', async (e) => { if (!('Notification' in window)) { e.target.checked = false; return; } e.target.checked = (await Notification.requestPermission()) === 'granted'; });
+  document.addEventListener('tb3:alert', (e) => { load(); if (e.detail.event === 'new' && !sel) open(e.detail.alert.id); });
+  setInterval(load, 5000);
+  await load();
+  const first = alerts.find((a) => a.status === 'open');
+  if (first) open(first.id);
+});
+</script>
+</body>
+</html>

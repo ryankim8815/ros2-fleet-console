@@ -26,7 +26,8 @@ MAPS_DIR = os.path.join(CONFIG, 'maps')
 ZONES_DIR = os.path.join(CONFIG, 'zones')
 MASKS_DIR = os.path.join(CONFIG, 'masks')
 LOG_DIR = os.path.join(APP_DIR, 'logs')
-MAPPING_LAUNCH = os.path.join(APP_DIR, 'robot', 'mapping_ns.launch.py')
+COOP_LAUNCH = os.path.join(APP_DIR, 'robot', 'coop_mapping.launch.py')
+PATROL_NODE = os.path.join(APP_DIR, 'robot', 'patrol_node.py')
 
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$')
 ID_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]{0,40}$')
@@ -123,6 +124,50 @@ def map_png(name):
     buf = io.BytesIO()
     rgba.save(buf, 'PNG')
     return buf.getvalue()
+
+
+def apply_to_baseline(name, kind, x, y, w, h):
+    """경보를 기준 지도에 반영: 새로 생긴 것은 벽(점유)으로, 사라진 것은 빈 칸으로. 원본은 .bak 로 한 번 보관."""
+    import shutil
+    info = map_info(name)
+    W, H, maxval, px = _read_pgm(info['image'])
+    if not os.path.exists(info['image'] + '.bak'):
+        shutil.copy2(info['image'], info['image'] + '.bak')
+    grid = bytearray(px)
+    res, ox, oy = info['resolution'], info['origin'][0], info['origin'][1]
+    i0, i1 = int((x - w / 2 - ox) / res), int((x + w / 2 - ox) / res)
+    j0, j1 = int((y - h / 2 - oy) / res), int((y + h / 2 - oy) / res)
+    val = 0 if kind == 'new' else 254
+    if info['negate']:
+        val = maxval - val
+    def occupied(i, j):
+        v = grid[(H - 1 - j) * W + i]
+        return (maxval - v if info['negate'] else v) <= 0.35 * maxval
+
+    n, seeds = 0, []
+    for j in range(max(0, j0), min(H - 1, j1) + 1):
+        row = (H - 1 - j) * W
+        for i in range(max(0, i0), min(W - 1, i1) + 1):
+            if kind == 'missing' and occupied(i, j):
+                seeds.append((i, j))
+            grid[row + i] = val
+            n += 1
+    if kind == 'missing':
+        # LiDAR 는 사라진 물체의 앞면만 확인하므로, 상자에 닿아 있던 나머지(뒷면)도 0.5 m 안에서 함께 지움
+        m = int(round(0.5 / res))
+        lo_i, hi_i, lo_j, hi_j = max(0, i0 - m), min(W - 1, i1 + m), max(0, j0 - m), min(H - 1, j1 + m)
+        stack = list(seeds)
+        while stack:
+            ci, cj = stack.pop()
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    ni, nj = ci + di, cj + dj
+                    if lo_i <= ni <= hi_i and lo_j <= nj <= hi_j and occupied(ni, nj):
+                        grid[(H - 1 - nj) * W + ni] = val
+                        n += 1
+                        stack.append((ni, nj))
+    _atomic_write(info['image'], f'P5\n{W} {H}\n{maxval}\n'.encode() + bytes(grid), binary=True)
+    return n
 
 
 # ------------------------------------------------------------------ 구역
@@ -266,26 +311,19 @@ def write_zones(name, data, robots):
     return clean, masks
 
 
-# ------------------------------------------------------------------ 지도 작성 (SLAM)
-class Mapping:
-    """로봇 한 대로 slam_toolbox 를 실행하고 지도를 저장. 한 번에 하나만."""
+# ------------------------------------------------------------------ 백그라운드 프로세스 (지도 만들기, 경비)
+class _Proc:
+    """launch 프로세스 하나를 새 세션으로 띄우고, 정지할 때 그룹째 SIGINT → (10초 뒤) SIGKILL."""
 
-    def __init__(self):
+    def __init__(self, logname):
         self.lock = threading.Lock()
         self.proc = None
-        self.robot = None
         self.started = 0.0
-        self.log = os.path.join(LOG_DIR, 'mapping.log')
+        self.info = {}
+        self.log = os.path.join(LOG_DIR, logname)
 
-    def status(self):
-        with self.lock:
-            running = self.proc is not None and self.proc.poll() is None
-            if self.proc is not None and not running:
-                code = self.proc.returncode
-                self.proc = None
-                return {'running': False, 'robot': self.robot, 'exited': code, 'log': self._tail()}
-            return {'running': running, 'robot': self.robot if running else None,
-                    'seconds': round(time.time() - self.started) if running else 0}
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
 
     def _tail(self, n=15):
         try:
@@ -294,25 +332,31 @@ class Mapping:
         except FileNotFoundError:
             return []
 
-    def start(self, robot):
+    def status(self):
         with self.lock:
-            if self.proc is not None and self.proc.poll() is None:
-                raise ValueError(f'이미 {self.robot["name"]} 로 지도를 작성하는 중입니다')
-            os.makedirs(LOG_DIR, exist_ok=True)
-            cmd = ['ros2', 'launch', MAPPING_LAUNCH, f'namespace:={robot["ns"].strip("/")}',
-                   f'frame_prefix:={robot.get("tfPrefix", "")}', f'tf_topic:={robot.get("tfTopic", "/tf")}']
-            logf = open(self.log, 'w', encoding='utf-8')
-            # 새 세션: 정지할 때 launch 와 자식 노드를 한꺼번에 종료
-            self.proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
-            self.robot = {k: robot[k] for k in ('id', 'name', 'ns', 'tfTopic', 'tfPrefix')}
-            self.started = time.time()
-            return {'running': True, 'robot': self.robot, 'cmd': ' '.join(cmd)}
+            if self.proc is not None and self.proc.poll() is not None:
+                code = self.proc.returncode
+                self.proc = None
+                return {'running': False, **self.info, 'exited': code, 'log': self._tail()}
+            if self.running():
+                return {'running': True, **self.info, 'seconds': round(time.time() - self.started)}
+            return {'running': False}
+
+    def _start(self, cmd, info):
+        if self.running():
+            raise ValueError('이미 실행 중입니다')
+        os.makedirs(LOG_DIR, exist_ok=True)
+        logf = open(self.log, 'w', encoding='utf-8')
+        self.proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+        self.started = time.time()
+        self.info = info
+        return {'running': True, **info}
 
     def stop(self):
         with self.lock:
             p = self.proc
+            self.proc = None
             if p is None or p.poll() is not None:
-                self.proc = None
                 return {'running': False}
             try:
                 os.killpg(p.pid, signal.SIGINT)
@@ -320,19 +364,36 @@ class Mapping:
             except subprocess.TimeoutExpired:
                 os.killpg(p.pid, signal.SIGKILL)
                 p.wait(timeout=5)
-            self.proc = None
-            return {'running': False, 'robot': self.robot}
+            return {'running': False, **self.info}
+
+
+class Mapping(_Proc):
+    """여러 로봇(또는 한 대)이 함께 지도 만들기: 로봇마다 slam_toolbox + 지도 합치기(/map_merged)."""
+
+    def __init__(self):
+        super().__init__('mapping.log')
+
+    def start(self, robots, explore=False):
+        """robots: fleet 로봇 dict 에 시작 자세 x, y, yaw 를 더한 목록"""
+        if not robots:
+            raise ValueError('지도를 만들 로봇을 하나 이상 고르세요')
+        with self.lock:
+            spec = [{'ns': r['ns'], 'prefix': r.get('tfPrefix', ''), 'tf': r.get('tfTopic', '/tf'), 'type': r.get('type'),
+                     'x': float(r.get('x', 0)), 'y': float(r.get('y', 0)), 'yaw': float(r.get('yaw', 0))} for r in robots]
+            cmd = ['ros2', 'launch', COOP_LAUNCH, f'robots:={json.dumps(spec)}', f'explore:={"true" if explore else "false"}']
+            info = {'robots': [{'id': r['id'], 'name': r['name'], 'ns': r['ns'], 'x': float(r.get('x', 0)),
+                                'y': float(r.get('y', 0)), 'yaw': float(r.get('yaw', 0))} for r in robots],
+                    'explore': bool(explore)}
+            return self._start(cmd, info)
 
     def save(self, name):
         if not NAME_RE.match(name or ''):
             raise ValueError('지도 이름은 영문·숫자·_- 로 1~41자')
-        with self.lock:
-            if self.proc is None or self.proc.poll() is not None:
-                raise ValueError('지도 작성이 실행 중이 아닙니다')
-            ns = self.robot['ns']
+        if not self.running():
+            raise ValueError('지도 만들기가 실행 중이 아닙니다')
         os.makedirs(MAPS_DIR, exist_ok=True)
         base = os.path.join(MAPS_DIR, name)
-        cmd = ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-t', f'{ns}/map', '-f', base,
+        cmd = ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-t', '/map_merged', '-f', base,
                '--ros-args', '-p', 'map_subscribe_transient_local:=true', '-p', 'save_map_timeout:=10.0']
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
         if r.returncode != 0 or not os.path.exists(base + '.yaml'):
@@ -343,3 +404,18 @@ class Mapping:
         y = re.sub(r'^image:.*$', f'image: {name}.pgm', y, flags=re.M)
         _atomic_write(base + '.yaml', y)
         return {k: v for k, v in map_info(name).items() if k not in ('yaml', 'image')}
+
+
+class Patrol(_Proc):
+    """경비: patrol_node.py (순찰 경로 반복 + 기준 지도와 차이 감지 + 경보 DB)."""
+
+    def __init__(self):
+        super().__init__('patrol.log')
+
+    def start(self, map_name, fleet_path, db_path):
+        import sys
+        map_info(map_name)
+        with self.lock:
+            cmd = [sys.executable, PATROL_NODE, '--ros-args', '-p', f'map_name:={map_name}', '-p', f'fleet:={fleet_path}',
+                   '-p', f'db:={db_path}', '-p', f'config_dir:={CONFIG}']
+            return self._start(cmd, {'map': map_name})

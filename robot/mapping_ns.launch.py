@@ -39,7 +39,7 @@ def launch_setup(context):
             'use_sim_time': LaunchConfiguration('use_sim_time').perform(context).lower() == 'true',
             'odom_frame': f'{prefix}odom',
             'base_frame': f'{prefix}base_footprint',
-            'map_frame': 'map',
+            'map_frame': LaunchConfiguration('map_frame').perform(context),   # 협동 지도 만들기: '<ns>/map'
             'scan_topic': 'scan',          # 상대 이름 → /<ns>/scan
             'map_name': 'map',             # 기본값 '/map' 대신 /<ns>/map
             'use_lifecycle_manager': False,
@@ -64,5 +64,7 @@ def generate_launch_description():
         DeclareLaunchArgument('frame_prefix', default_value='', description="TF 프레임 접두사 (TurtleBot3: 'tb3_01/')"),
         DeclareLaunchArgument('tf_topic', default_value='/tf', description='로봇의 TF 토픽 (/tf 또는 /<ns>/tf)'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('map_frame', default_value='map',
+                              description="SLAM 지도 프레임. 여러 대가 함께 그릴 때는 로봇마다 다르게 ('tb3_01/map')"),
         OpaqueFunction(function=launch_setup),
     ])

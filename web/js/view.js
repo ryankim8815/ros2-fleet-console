@@ -227,12 +227,13 @@
           z.points.forEach((p, i) => { const [sx, sy] = this.toScreen(p[0], p[1]); if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
           ctx.closePath();
           const keep = z.type === 'keepout';
-          ctx.fillStyle = keep ? `rgba(248,113,113,${z.dim ? 0.06 : 0.2})` : `rgba(74,222,128,${z.dim ? 0.03 : 0.08})`;
+          // z.fill / z.stroke / z.dash 를 주면 그 모양으로 (경비 경보 상자 등)
+          ctx.fillStyle = z.fill || (keep ? `rgba(248,113,113,${z.dim ? 0.06 : 0.2})` : `rgba(74,222,128,${z.dim ? 0.03 : 0.08})`);
           ctx.fill();
-          ctx.strokeStyle = keep ? '#F87171' : '#4ADE80';
+          ctx.strokeStyle = z.stroke || (keep ? '#F87171' : '#4ADE80');
           ctx.globalAlpha = z.dim ? 0.35 : 1;
           ctx.lineWidth = z.selected ? 3 : 1.5;
-          ctx.setLineDash(keep ? [] : [6, 4]);
+          ctx.setLineDash(z.dash || (keep ? [] : [6, 4]));
           ctx.stroke();
           ctx.setLineDash([]);
           if (z.label) {
@@ -240,7 +241,7 @@
             const [lx, ly] = this.toScreen(c[0], c[1]);
             ctx.font = '600 12px Inter, "Noto Sans KR", sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillStyle = keep ? '#FCA5A5' : '#86EFAC';
+            ctx.fillStyle = z.labelColor || (keep ? '#FCA5A5' : '#86EFAC');
             ctx.fillText(z.label, lx, ly);
             ctx.textAlign = 'start';
           }
@@ -261,6 +262,21 @@
       if (this.layers.path) {
         line(st.trail, 'rgba(45,212,191,0.55)', 2.5, [6, 5]);
         line(st.plan, COLORS.plan, 2.5);
+      }
+      // 순찰 경로: [{points, color, loop, highlight}] — 지점 번호 표시
+      if (st.routes && this.layers.routes !== false) {
+        for (const r of st.routes) {
+          if (!r.points || !r.points.length) continue;
+          line(r.loop && r.points.length > 2 ? [...r.points, r.points[0]] : r.points, r.color, r.highlight ? 3 : 2, [7, 5]);
+          r.points.forEach((p, i) => {
+            const [sx, sy] = this.toScreen(p[0], p[1]);
+            ctx.beginPath(); ctx.arc(sx, sy, r.highlight ? 9 : 7, 0, Math.PI * 2);
+            ctx.fillStyle = '#0E1116'; ctx.fill();
+            ctx.strokeStyle = r.color; ctx.lineWidth = 2; ctx.stroke();
+            ctx.fillStyle = r.color; ctx.font = '600 10px "JetBrains Mono", monospace'; ctx.textAlign = 'center';
+            ctx.fillText(String(i + 1), sx, sy + 3.5); ctx.textAlign = 'start';
+          });
+        }
       }
 
       // LiDAR

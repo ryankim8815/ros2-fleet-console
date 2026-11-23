@@ -9,8 +9,13 @@
 - GET  /api/maps/<name>.png   : 지도 이미지
 - GET  /api/zones/<name>      : 그 지도의 구역
 - PUT  /api/zones/<name>      : 구역 저장 + 로봇별 keepout 마스크 생성 (토큰)
-- GET  /api/mapping           : 지도 작성 상태
-- POST /api/mapping/start|stop|save : 로봇 한 대로 slam_toolbox 실행·정지, 지도 저장 (토큰)
+- GET  /api/mapping           : 지도 만들기 상태
+- POST /api/mapping/start|stop|save : 여러 로봇 slam_toolbox + 지도 합치기 실행·정지, 저장 (토큰)
+- GET  /api/mode, POST /api/mode    : 운영 모드 (operate | mapping | patrol, 바꾸기는 토큰)
+- GET/PUT /api/patrol/<지도>        : 순찰 경로·감지 설정 (저장은 토큰)
+- GET  /api/alerts?map=&status=open : 경보 목록, GET /api/alerts/<id> : 상세(주변 스캔 포함)
+- POST /api/alerts/<id> {status}    : 이상 없음(ok) / 오탐(false) / 다시 열기(open)
+- POST /api/alerts/<id>/baseline    : 기준 지도에 반영 (토큰)
 
 쓰기 요청은 같은 출처(Origin = Host)만 허용합니다. rosbridge 자체에는 인증이 없으므로
 신뢰할 수 있는 네트워크에서만 사용하세요.
@@ -30,6 +35,7 @@ import time
 import urllib.parse
 
 import maps
+import patrol_store as store
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 FLEET_PATH = os.path.join(APP_DIR, 'config', 'fleet.json')
@@ -211,6 +217,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             raise ValueError(f'등록되지 않은 로봇: {rid}')
         return r
 
+    def _query(self):
+        return dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
+
     def do_GET(self):
         path = self.path.split('?')[0]
         try:
@@ -234,6 +243,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json(200, maps.read_zones(m.group(1)))
             if path == '/api/mapping':
                 return self._json(200, MAPPING.status())
+            if path == '/api/mode':
+                return self._json(200, mode_status())
+            m = re.match(r'^/api/patrol/([^/]+)$', path)
+            if m:
+                return self._json(200, store.read_patrol(m.group(1)))
+            if path == '/api/alerts':
+                q = self._query()
+                with DB_LOCK:
+                    con = store.db()
+                    items = store.list_alerts(con, q.get('map') or None, q.get('status'), q.get('limit', 100), int(q.get('since', 0)))
+                    cnt = store.counts(con, q['map']) if q.get('map') else None
+                return self._json(200, {'alerts': items, 'counts': cnt})
+            m = re.match(r'^/api/alerts/(\d+)$', path)
+            if m:
+                with DB_LOCK:
+                    a = store.get_alert(store.db(), int(m.group(1)))
+                return self._json(200, a) if a else self._json(404, {'error': '없는 경보입니다'})
         except FileNotFoundError:
             return self._json(404, {'error': '없는 지도입니다'})
         except ValueError as e:
@@ -242,34 +268,63 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split('?')[0]
-        if path == '/api/control':
-            if not self._same_origin():
-                return self._json(403, {'error': '다른 출처의 요청은 허용하지 않습니다'})
-            try:
+        if not self._same_origin():
+            return self._json(403, {'error': '다른 출처의 요청은 허용하지 않습니다'})
+        try:
+            if path == '/api/control':
                 return self._json(200, control(self._body()))
-            except (ValueError, json.JSONDecodeError) as e:
-                return self._json(400, {'error': str(e)})
-        m = re.match(r'^/api/mapping/(start|stop|save)$', path)
+            # 경보 처리(이상 없음 / 오탐 / 다시 열기)는 관제 담당자 누구나 (토큰 불필요, 같은 출처만)
+            m = re.match(r'^/api/alerts/(\d+)$', path)
+            if m:
+                body = self._body()
+                st = str(body.get('status', ''))
+                if st == 'baseline':
+                    return self._json(400, {'error': '기준 지도 반영은 /api/alerts/<id>/baseline (토큰)'})
+                with DB_LOCK:
+                    return self._json(200, store.set_status(store.db(), int(m.group(1)), st, body.get('note', '')))
+        except KeyError:
+            return self._json(404, {'error': '없는 경보입니다'})
+        except (ValueError, json.JSONDecodeError) as e:
+            return self._json(400, {'error': str(e)})
+
+        m = re.match(r'^/api/(mapping/(start|stop|save)|mode|alerts/(\d+)/baseline)$', path)
         if not m:
             return self._json(404, {'error': 'not found'})
         if not self._authorized():
             return None
         try:
             body = self._body()
-            if m.group(1) == 'start':
-                return self._json(200, MAPPING.start(self._robot(str(body.get('robot', '')))))
-            if m.group(1) == 'stop':
+            if path == '/api/mode':
+                return self._json(200, set_mode(str(body.get('mode', ''))))
+            if m.group(3):
+                with DB_LOCK:
+                    con = store.db()
+                    a = store.get_alert(con, int(m.group(3)))
+                    if not a:
+                        return self._json(404, {'error': '없는 경보입니다'})
+                    n = maps.apply_to_baseline(a['map'], a['kind'], a['x'], a['y'], a['w'], a['h'])
+                    a = store.set_status(con, a['id'], 'baseline', body.get('note', '기준 지도에 반영'))
+                return self._json(200, {'alert': a, 'cells': n})
+            if m.group(2) == 'start':
+                robots = []
+                for item in body.get('robots', []):
+                    r = dict(self._robot(str(item.get('id', ''))))
+                    r.update({k: float(item.get(k, 0)) for k in ('x', 'y', 'yaw')})
+                    robots.append(r)
+                return self._json(200, MAPPING.start(robots, bool(body.get('explore'))))
+            if m.group(2) == 'stop':
                 return self._json(200, MAPPING.stop())
             return self._json(200, MAPPING.save(str(body.get('name', ''))))
         except FileNotFoundError as e:
-            return self._json(500, {'error': f'실행 파일을 찾지 못했습니다 (ROS 환경에서 실행했는지 확인): {e}'})
-        except (ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+            return self._json(500, {'error': f'파일을 찾지 못했습니다 (ROS 환경에서 실행했는지, 지도가 있는지 확인): {e}'})
+        except (ValueError, KeyError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
             return self._json(400, {'error': str(e)})
 
     def do_PUT(self):
         path = self.path.split('?')[0]
         m = re.match(r'^/api/zones/([^/]+)$', path)
-        if path != '/api/fleet' and not m:
+        mp = re.match(r'^/api/patrol/([^/]+)$', path)
+        if path != '/api/fleet' and not m and not mp:
             return self._json(404, {'error': 'not found'})
         if not self._authorized():
             return None
@@ -277,6 +332,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if m:
                 zones, masks = maps.write_zones(m.group(1), self._body(), read_fleet().get('robots', []))
                 return self._json(200, {'zones': zones, 'masks': masks})
+            if mp:
+                maps.map_info(mp.group(1))
+                ids = {r['id'] for r in read_fleet().get('robots', [])}
+                return self._json(200, store.write_patrol(mp.group(1), self._body(), ids))
             data = validate_fleet(self._body())
             write_fleet(data)
             return self._json(200, data)
@@ -287,6 +346,60 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 MAPPING = maps.Mapping()
+PATROL = maps.Patrol()
+DB_LOCK = threading.Lock()
+MODE_LOCK = threading.RLock()
+WATCHDOG = {'restarts': 0, 'last': None}
+
+
+def mode_status():
+    m = store.read_mode()
+    return {**m, 'mapping': MAPPING.status(), 'patrol': {**PATROL.status(), 'restarts': WATCHDOG['restarts'], 'lastRestart': WATCHDOG['last']},
+            'map': read_fleet().get('mapFile')}
+
+
+def patrol_watchdog():
+    """경비 모드인데 patrol_node 가 죽어 있으면 다시 띄움 (죽은 채로 두면 경보가 조용히 멈춤). 연달아 죽으면 간격을 늘림."""
+    wait = 5
+    while True:
+        time.sleep(wait)
+        try:
+            with MODE_LOCK:
+                if store.read_mode()['mode'] != 'patrol' or PATROL.running():
+                    wait = 5
+                    continue
+                st = PATROL.status()
+                print(f'경비 프로세스가 멈춰 있어 다시 시작합니다 (exit={st.get("exited")})', flush=True)
+                PATROL.start(read_fleet().get('mapFile'), FLEET_PATH, store.DB_PATH)
+                WATCHDOG['restarts'] += 1
+                WATCHDOG['last'] = time.time()
+                wait = min(60, wait * 2)
+        except Exception as e:  # noqa: BLE001
+            print(f'경비 감시 오류: {e}', flush=True)
+
+
+def set_mode(mode):
+    """운영 모드 바꾸기. 경비 = patrol_node 시작, 다른 모드로 가면 경비·지도 만들기 프로세스 정지."""
+    if mode not in store.MODES:
+        raise ValueError('모드는 operate | mapping | patrol')
+    with MODE_LOCK:
+        return _set_mode(mode)
+
+
+def _set_mode(mode):
+    if mode == 'patrol':
+        map_name = read_fleet().get('mapFile')
+        if not map_name:
+            raise ValueError('활성 지도가 없습니다. 먼저 지도를 만들고 활성 지도로 지정하세요')
+        MAPPING.stop()
+        if not PATROL.running():
+            PATROL.start(map_name, FLEET_PATH, store.DB_PATH)
+    else:
+        PATROL.stop()
+        if mode != 'mapping':
+            MAPPING.stop()
+    store.write_mode(mode)
+    return mode_status()
 
 
 def main():
@@ -296,6 +409,15 @@ def main():
     ap.add_argument('--dir', default=os.path.join(APP_DIR, 'web'))
     a = ap.parse_args()
     admin_token()  # 없으면 생성
+    if store.read_mode()['mode'] == 'patrol':   # 다시 켰을 때 경비 모드였으면 이어서
+        try:
+            set_mode('patrol')
+        except Exception as e:  # noqa: BLE001
+            print(f'경비 모드를 다시 시작하지 못했습니다: {e}', flush=True)
+            store.write_mode('operate')
+    elif store.read_mode()['mode'] == 'mapping':
+        store.write_mode('operate')   # 지도 만들기는 이어서 하지 않음
+    threading.Thread(target=patrol_watchdog, daemon=True).start()
     handler = functools.partial(Handler, directory=a.dir)
     with http.server.ThreadingHTTPServer((a.bind, a.port), handler) as srv:
         print(f'TB3 web: http://{a.bind}:{a.port}/ ({a.dir}), fleet: {FLEET_PATH}', flush=True)
@@ -303,7 +425,8 @@ def main():
         try:
             srv.serve_forever()
         finally:
-            MAPPING.stop()   # 서버를 끄면 지도 작성 프로세스도 정지
+            MAPPING.stop()   # 서버를 끄면 지도 만들기·경비 프로세스도 정지
+            PATROL.stop()
 
 
 if __name__ == '__main__':
