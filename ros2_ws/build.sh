@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 프로젝트 ROS 환경(.robostack/jazzy, Python 3.14)용 인터페이스 패키지 빌드.
 #
-# rosbridge 가 로봇의 서비스·토픽 타입(예: turtlebot3_msgs/srv/Sound)을 알려면 그 타입의 Python 모듈이
-# PC 의 ROS 환경에 있어야 합니다. RoboStack 채널의 ros-jazzy-turtlebot3-msgs 는 Python 3.12 용뿐이라
-# 이 환경(3.14)에 설치할 수 없어서 소스(src/)를 여기서 빌드합니다.
+# rosbridge 가 로봇의 서비스·토픽 타입을 알려면 그 타입의 Python 모듈이 PC 의 ROS 환경에 있어야 합니다.
+# RoboStack 에 있는 패키지(turtlebot3_msgs, nav2 등)는 conda 로 설치하고(README "ROS 환경"),
+# RoboStack 에 없는 것(예: Pinky 의 pinky_interfaces)만 소스를 src/ 에 넣어 여기서 빌드합니다.
 #
 #   ./ros2_ws/build.sh          src/ 의 패키지를 모두 빌드해 ros2_ws/install 에 설치
 #   (bin/ros2 가 ros2_ws/install 을 자동으로 불러옵니다)
@@ -17,8 +17,9 @@ project_root="$(cd -- "$ws/.." && pwd)"
 ros_prefix="$project_root/.robostack/jazzy"
 conda_exe="${CONDA_EXE:-$(command -v conda || echo /home/kernel/anaconda3/bin/conda)}"
 
-# 빌드 순서: 다른 패키지에 기대는 것이 생기면 여기 순서를 맞추세요
-packages=(turtlebot3_msgs)
+# 빌드할 패키지 (src/<이름>). 다른 패키지에 기대는 것이 생기면 여기 순서를 맞추세요. 예: packages=(pinky_interfaces)
+packages=()
+[[ ${#packages[@]} -gt 0 ]] || { echo "빌드할 패키지가 없습니다 (build.sh 의 packages 목록)"; exit 0; }
 
 for pkg in "${packages[@]}"; do
   [[ -f "$ws/src/$pkg/package.xml" ]] || { echo "없음: $ws/src/$pkg" >&2; exit 1; }

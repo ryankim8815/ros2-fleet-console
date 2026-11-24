@@ -29,19 +29,37 @@ pixi run web bind:=127.0.0.1                # 이 PC 에서만 접속 (웹·rosb
 ./bin/ros2 run rosbridge_server rosbridge_websocket
 ```
 
-### 로봇 인터페이스 패키지 (ros2_ws)
+### ROS 환경 (RoboStack)
 
-웹이 로봇 서비스를 부르려면 PC 의 rosbridge 가 그 타입을 알아야 합니다. RoboStack 에 이 환경(Python 3.14)용이 없는 패키지는 `ros2_ws/src` 에 소스로 두고 빌드합니다. `bin/ros2`(따라서 `pixi run web`)는 `ros2_ws/install` 이 있으면 자동으로 함께 불러옵니다.
+웹 서버·rosbridge·지도 만들기(slam_toolbox)·Nav2·경로 실행기·경비 노드는 모두 프로젝트 안의 RoboStack 환경 `.robostack/jazzy` (ROS 2 Jazzy, Python 3.14)에서 돕니다. `bin/ros2`(그리고 `pixi run web`)가 이 환경으로 실행합니다. 시스템의 `/opt/ros/jazzy` 는 쓰지 않습니다.
 
-| 패키지 | 쓰는 곳 | 출처 |
-| --- | --- | --- |
-| `turtlebot3_msgs` 2.4.0 | TurtleBot3 사운드 `/sound` (`turtlebot3_msgs/srv/Sound`) | ROBOTIS-GIT/turtlebot3_msgs `jazzy` (커밋 9209e01, 2025-04-30) |
+| 들어 있는 것 | 패키지 (robostack-jazzy, 빌드 31) |
+| --- | --- |
+| ROS 기본·RViz | `ros-jazzy-desktop` |
+| 웹 연결 | `ros-jazzy-rosbridge-suite` 2.7.1 |
+| 지도 만들기 | `ros-jazzy-slam-toolbox` 2.8.5 |
+| Nav2 (AMCL·지도 서버·waypoint follower·keepout 필터 등) | `ros-jazzy-navigation2`, `ros-jazzy-nav2-bringup` 1.3.14 |
+| TurtleBot3 서비스 타입 (사운드) | `ros-jazzy-turtlebot3-msgs` 2.4.0 |
+
+새 PC 에 같은 환경을 만들 때 (RoboStack 의 `ros-jazzy-*` 는 껍데기이고 실제 파일은 Python 버전별 `ros2-*` 패키지에 있어, 버전·빌드를 고정해야 빨리 풀립니다):
 
 ```bash
-./ros2_ws/build.sh        # 처음 한 번, 소스를 바꾼 뒤 (빌드 결과 ros2_ws/build·install 은 저장소에 넣지 않음)
+conda create -y -p .robostack/jazzy -c robostack-jazzy -c conda-forge python=3.14 "ros2-distro-mutex=0.21.0=jazzy_31" \
+  "ros-jazzy-desktop=*=*_31" "ros-jazzy-rosbridge-suite=2.7.1=*_31" "ros-jazzy-slam-toolbox=2.8.5=*_31" \
+  "ros-jazzy-navigation2=1.3.14=*_31" "ros-jazzy-nav2-bringup=1.3.14=*_31" "ros-jazzy-turtlebot3-msgs=2.4.0=*_31"
 ```
 
-빌드한 뒤에는 웹 서버를 다시 켜야 rosbridge 에 반영됩니다. 패키지를 더하려면 소스를 `ros2_ws/src/<패키지>` 에 넣고 `build.sh` 의 `packages` 목록에 이름을 넣습니다.
+- 이 PC 의 환경 기록: 처음(rev 0) desktop + rosbridge, rev 1 (2026-11-24) 에 slam_toolbox·Nav2·turtlebot3_msgs 추가. 되돌리기: `conda install -p .robostack/jazzy --revision 0`
+- **자동 탐색(explore_lite)은 RoboStack 에 없습니다.** 지도는 로봇을 조종하며 만듭니다 (자동 탐색을 쓰려면 m-explore-ros2 를 소스로 빌드해야 함).
+- 셸이 `/opt/ros/jazzy` 를 불러와 `PYTHONPATH` 에 그 경로가 있어도, 환경의 패키지가 먼저 쓰입니다 (확인함).
+
+### RoboStack 에 없는 인터페이스 패키지 (ros2_ws)
+
+웹이 로봇 서비스를 부르려면 rosbridge 가 그 타입을 알아야 합니다. RoboStack 에 없는 패키지(예: Pinky 의 `pinky_interfaces`)는 소스를 `ros2_ws/src/<패키지>` 에 넣고 `ros2_ws/build.sh` 의 `packages` 목록에 이름을 넣은 뒤 빌드합니다. `bin/ros2` 는 `ros2_ws/install` 이 있으면 자동으로 함께 불러옵니다. 지금은 빌드할 패키지가 없습니다.
+
+```bash
+./ros2_ws/build.sh        # 빌드 결과 ros2_ws/build·install 은 저장소에 넣지 않음. 빌드한 뒤 웹 서버를 다시 켜야 반영
+```
 
 ### 운영 모드
 
@@ -286,7 +304,7 @@ ros2-fleet-console/
 ## 알려진 제약
 
 - 로봇 없이 PC 에서 가짜 로봇으로 시험한 결과: [docs/test-report.md](docs/test-report.md). **실제 TurtleBot3·Pinky Pro 로는 아직 시험하지 않았습니다.**
-- Pinky LED·표정 서비스 타입(`pinky_interfaces`)은 아직 이 PC 의 `ros2_ws` 에 없습니다. Pinky Pro 공개 저장소의 인터페이스 패키지를 `ros2_ws/src/pinky_interfaces` 에 넣고 빌드해야 웹에서 LED·표정을 바꿀 수 있습니다 ([로봇 인터페이스 패키지](#로봇-인터페이스-패키지-ros2_ws)).
+- Pinky LED·표정 서비스 타입(`pinky_interfaces`)은 아직 이 PC 의 `ros2_ws` 에 없습니다. Pinky Pro 공개 저장소의 인터페이스 패키지를 `ros2_ws/src/pinky_interfaces` 에 넣고 빌드해야 웹에서 LED·표정을 바꿀 수 있습니다 ([RoboStack 에 없는 인터페이스 패키지](#robostack-에-없는-인터페이스-패키지-ros2_ws)).
 - rosbridge 2.7.1 의 `/rosapi/action_type` 은 rosapi 를 종료시키므로 쓰지 않습니다 (액션 타입은 이름으로 추정).
 - `/map` 은 PNG 압축으로 3초 간격으로 받습니다 (1000×1000 지도 2.97 MB → 44 KB).
 - 플릿 화면은 통신량을 줄이려고 odom 을 최대 10 Hz, LiDAR 는 2초 간격(선택 로봇을 LiDAR 레이어로 볼 때만 0.2초)으로 받습니다. 한 로봇의 정확한 주기는 로봇 대시보드에서 봅니다.
