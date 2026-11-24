@@ -425,7 +425,7 @@ ROUTE_RUNNER = os.path.join(APP_DIR, 'robot', 'route_runner_node.py')
 
 
 class RouteRunner(_Proc):
-    """이동 경로 실행기: route_runner_node.py (data/places.db 의 실행 중인 할당을 Nav2 FollowWaypoints 로 반복)."""
+    """이동 경로 실행기: route_runner_node.py (data/fleet.db 의 실행 중인 할당을 Nav2 FollowWaypoints 로 반복)."""
 
     def __init__(self):
         super().__init__('routes.log')

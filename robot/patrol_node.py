@@ -7,7 +7,7 @@
        - 새로 생긴 것: 기준 지도에서 비어 있던 칸(벽에서 tol 이상 떨어진)에 스캔 끝점이 닿음
        - 사라진 것: 기준 지도의 벽 칸을 스캔 빛줄기가 뚫고 지나감
      같은 칸이 연속 persist 번 이상 보이면 '확정', 확정 칸을 이어 붙인 덩어리가 min_area 이상이면 경보
-  3) 경보: data/alerts.db 에 기록하고 /fleet/alerts (std_msgs/String JSON) 로 알림
+  3) 경보: data/fleet.db 의 alerts·alert_robots 에 기록하고 /fleet/alerts (std_msgs/String JSON) 로 알림
      가까운 곳의 열린 경보가 있으면 새로 만들지 않고 갱신 (다른 로봇이 다시 보면 등급 올림)
 
 명령: /fleet/patrol_cmd (String JSON)
@@ -304,10 +304,10 @@ class PatrolNode(Node):
         self.cfg_mtime = os.path.getmtime(p) if os.path.exists(p) else 0
 
     def reload(self):
-        with self.db_lock:   # 실행 중 alerts.db 가 지워졌으면 새 파일로 (지워진 파일에 경보를 쓰지 않게)
+        with self.db_lock:   # 실행 중 DB 파일이 지워졌으면 새 파일로 (지워진 파일에 경보를 쓰지 않게)
             self.con, fresh = dbutil.ensure(self.con, self.db_path, store.MIGRATIONS)
         if fresh:
-            self.get_logger().warn('alerts.db 가 새로 만들어졌습니다')
+            self.get_logger().warn('DB 파일(data/fleet.db)이 새로 만들어졌습니다')
         p = os.path.join(store.PATROL_DIR, f'{self.map_name}.json')
         if os.path.exists(p) and os.path.getmtime(p) != self.cfg_mtime:
             old = json.dumps(self.routes, sort_keys=True)
@@ -404,6 +404,7 @@ class PatrolNode(Node):
             area = max(area, a['area'], max(uw, 0.1) * max(uh, 0.1))
             sev = self.severity(kind, area, robots)
             with self.con:
+                store.ensure_refs(self.con, self.map_name, robot.id, now)
                 self.con.execute('UPDATE alerts SET last_seen=?, seen=seen+1, area=?, severity=?, x=?, y=?, w=?, h=? WHERE id=?',
                                  (now, area, sev, ux, uy, uw, uh, a['id']))
                 store.record_sighting(self.con, a['id'], robot.id, now)
@@ -412,6 +413,7 @@ class PatrolNode(Node):
         near = [[x, y] for x, y in pts if (x - cx) ** 2 + (y - cy) ** 2 < 2.25][:400]
         sev = self.severity(kind, area, [robot.id])
         with self.con:
+            store.ensure_refs(self.con, self.map_name, robot.id, now)
             cur = self.con.execute(
                 'INSERT INTO alerts (map, kind, x, y, w, h, area, first_seen, last_seen, seen, severity, status, scan) '
                 "VALUES (?,?,?,?,?,?,?,?,?,1,?,'open',?)",

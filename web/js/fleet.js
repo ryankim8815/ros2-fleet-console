@@ -105,7 +105,7 @@ window.App.ready.then((App) => {
   }
   setInterval(updateZones, 1000);
 
-  // ---- 이름 붙인 지점 (활성 지도, data/places.db) → 지도 표시 + "지점으로 보내기" ----
+  // ---- 이름 붙인 지점 (활성 지도, data/fleet.db) → 지도 표시 + "지점으로 보내기" ----
   let places = [];
   const placeSel = $('#place-goal');
   async function loadPlaces() {

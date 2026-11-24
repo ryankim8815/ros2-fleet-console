@@ -1,197 +1,38 @@
-"""지점(좌표), 이동 경로, 로봇별 경로 할당과 실행 이력 저장소 (SQLite, data/places.db).
+"""지점(좌표), 이동 경로, 로봇별 경로 할당과 실행 이력: 읽고 쓰는 함수 (DB 는 fleet_db.py 의 data/fleet.db 하나).
 
-테이블 (스키마 버전 2, PRAGMA user_version)
-  maps               지도 이름 (config/maps/<name>.yaml 을 저장·서버 시작 때 등록)
-  robots             로봇 (config/fleet.json 과 동기화, 목록에서 빠지면 active = 0)
-  places             지점: 지도별, 이름은 지도 안에서 겹치지 않음
-  routes             이동 경로: 지도별, 이름은 지도 안에서 겹치지 않음
-  route_points       경로의 지점 순서. (route_id, map)·(place_id, map) 복합 외래 키로 같은 지도의 지점만
-  route_assignments  로봇마다 경로 하나 + 반복 횟수(repeat_count) + 지금 실행(current_run_id)
-  route_runs         시작할 때마다 한 줄: 상태·진행(바퀴, 지점)·시각 (실행기가 진행을 씀)
-  route_run_events   실행 중 일어난 일 (시작·멈춤·이어서·바퀴 완료·실패·경로 수정 …)
-
+다루는 테이블: maps, robots (참조), places, routes, route_points, route_assignments, route_runs, route_run_events
+  - 지점·경로는 지도별, 이름은 지도 안에서 겹치지 않음. 경로에는 같은 지도의 지점만 (DB 복합 외래 키)
+  - 할당: 로봇마다 경로 하나 + 반복 횟수(repeat_count). 시작할 때마다 route_runs 에 새 실행, 일어난 일은 route_run_events
 좌표는 그 지도의 map 프레임(m), 방향 yaw 는 라디안(-pi..pi)입니다.
-값의 범위·상태 값은 CHECK 제약으로 DB 가 직접 막습니다 (다른 도구로 고쳐도 깨지지 않게).
 serve.py 가 /api/places · /api/routes · /api/assignments 로 읽고 쓰고,
 robot/route_runner_node.py 가 실행 중인 run 을 Nav2 로 돌리며 진행을 기록합니다.
 """
 import math
 import os
 import re
-import sys
 import time
 
-import dbutil
+import fleet_db
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(APP_DIR, 'data', 'places.db')
+DB_PATH = fleet_db.DB_PATH
 
 MAP_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$')
 ROBOT_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]{0,40}$')
 CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')
 MAX_PER_MAP = 500
-MAX_COORD = 10000.0
+MAX_COORD = fleet_db.MAX_COORD
 MAX_ROUTE_POINTS = 100
-MAX_REPEAT = 10000
-RUN_STATES = ('running', 'paused', 'done', 'failed', 'stopped')
-EVENT_KINDS = ('start', 'resume', 'pause', 'stop', 'loop', 'done', 'fail', 'edit')
+MAX_REPEAT = fleet_db.MAX_REPEAT
+RUN_STATES = fleet_db.RUN_STATES
+EVENT_KINDS = fleet_db.EVENT_KINDS
 
 
-# ------------------------------------------------------------------ 스키마 · 마이그레이션
-def _v1(con):
-    """버전 1: 버전 관리 전의 구조 (이미 있는 DB 는 그대로, 새 DB 는 만들기만 하고 바로 2 로)"""
-    dbutil.script(con, '''
-CREATE TABLE IF NOT EXISTS places (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, map TEXT NOT NULL, name TEXT NOT NULL,
-  x REAL NOT NULL, y REAL NOT NULL, yaw REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
-  created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE (map, name));
-CREATE TABLE IF NOT EXISTS routes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, map TEXT NOT NULL, name TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
-  created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE (map, name));
-CREATE TABLE IF NOT EXISTS route_points (
-  route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE, seq INTEGER NOT NULL,
-  place_id INTEGER NOT NULL REFERENCES places(id), PRIMARY KEY (route_id, seq));
-CREATE TABLE IF NOT EXISTS route_assignments (
-  robot_id TEXT PRIMARY KEY, route_id INTEGER NOT NULL REFERENCES routes(id),
-  repeat_count INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'stopped',
-  loops_done INTEGER NOT NULL DEFAULT 0, waypoint INTEGER NOT NULL DEFAULT 0,
-  run_state TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '',
-  created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, finished_at REAL, heartbeat REAL);
-''')
-
-
-def _v2(con):
-    """버전 2: 지도·로봇 참조 테이블, 같은 지도 강제(복합 외래 키), CHECK 제약, 할당과 실행 이력 분리"""
-    now = time.time()
-    bad = con.execute('SELECT COUNT(*) FROM route_points p JOIN routes r ON r.id = p.route_id '
-                      'LEFT JOIN places pl ON pl.id = p.place_id AND pl.map = r.map WHERE pl.id IS NULL').fetchone()[0]
-    if bad:
-        print(f'places.db 마이그레이션: 경로와 다른 지도의 지점(또는 없는 지점) {bad}개를 경로에서 뺍니다', file=sys.stderr, flush=True)
-    dbutil.script(con, f'''
-CREATE TABLE maps (
-  name TEXT PRIMARY KEY CHECK (length(name) BETWEEN 1 AND 41),
-  created_at REAL NOT NULL
-);
-CREATE TABLE robots (
-  id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 41),
-  name TEXT NOT NULL DEFAULT '',
-  ns TEXT NOT NULL DEFAULT '',
-  type TEXT NOT NULL DEFAULT '',
-  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),   -- fleet.json 에서 빠지면 0 (지우지 않음: 이력 보존)
-  updated_at REAL NOT NULL
-);
-INSERT INTO maps (name, created_at)
-  SELECT map, MIN(created_at) FROM (SELECT map, created_at FROM places UNION ALL SELECT map, created_at FROM routes) GROUP BY map;
-INSERT INTO robots (id, active, updated_at) SELECT robot_id, 0, {now} FROM route_assignments;
-
-CREATE TABLE places_v2 (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  map TEXT NOT NULL REFERENCES maps(name) ON UPDATE CASCADE,
-  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 40),
-  x REAL NOT NULL CHECK (abs(x) <= {MAX_COORD}),
-  y REAL NOT NULL CHECK (abs(y) <= {MAX_COORD}),
-  yaw REAL NOT NULL DEFAULT 0 CHECK (yaw BETWEEN -3.1416 AND 3.1416),
-  note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 200),
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL,
-  UNIQUE (map, name),
-  UNIQUE (id, map)                      -- route_points 의 복합 외래 키 대상
-);
-INSERT INTO places_v2 SELECT id, map, name, x, y, yaw, note, created_at, updated_at FROM places;
-
-CREATE TABLE routes_v2 (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  map TEXT NOT NULL REFERENCES maps(name) ON UPDATE CASCADE,
-  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 40),
-  note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 200),
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL,
-  UNIQUE (map, name),
-  UNIQUE (id, map)
-);
-INSERT INTO routes_v2 SELECT id, map, name, note, created_at, updated_at FROM routes;
-
-CREATE TABLE route_points_v2 (
-  route_id INTEGER NOT NULL,
-  seq INTEGER NOT NULL CHECK (seq >= 0),
-  place_id INTEGER NOT NULL,
-  map TEXT NOT NULL,                    -- 경로와 지점이 같은 지도인지 DB 가 확인하게 하는 열
-  PRIMARY KEY (route_id, seq),
-  FOREIGN KEY (route_id, map) REFERENCES routes(id, map) ON DELETE CASCADE,
-  FOREIGN KEY (place_id, map) REFERENCES places(id, map)   -- 경로에서 쓰는 지점은 지울 수 없음
-);
-INSERT INTO route_points_v2 (route_id, seq, place_id, map)
-  SELECT p.route_id, p.seq, p.place_id, r.map FROM route_points p
-  JOIN routes r ON r.id = p.route_id JOIN places pl ON pl.id = p.place_id AND pl.map = r.map;
-
-CREATE TABLE route_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  robot_id TEXT NOT NULL REFERENCES robots(id),
-  route_id INTEGER REFERENCES routes(id) ON DELETE SET NULL,   -- 경로를 지워도 이력은 남김
-  route_name TEXT NOT NULL,             -- 시작할 때의 경로 이름 (경로가 지워져도 보이게)
-  map TEXT NOT NULL,
-  repeat_count INTEGER NOT NULL CHECK (repeat_count BETWEEN 0 AND {MAX_REPEAT}),   -- 0 = 멈출 때까지 계속
-  state TEXT NOT NULL CHECK (state IN {RUN_STATES}),
-  loops_done INTEGER NOT NULL DEFAULT 0 CHECK (loops_done >= 0),
-  waypoint INTEGER NOT NULL DEFAULT 0 CHECK (waypoint >= 0),   -- 이번 바퀴에서 다음에 갈 지점 순번 (0 부터)
-  run_state TEXT NOT NULL DEFAULT '',   -- 실행기가 쓰는 세부 상태: moving | nav_unavailable
-  message TEXT NOT NULL DEFAULT '',
-  started_at REAL NOT NULL,
-  finished_at REAL,
-  heartbeat REAL,                       -- 실행기가 마지막으로 진행을 쓴 시각
-  updated_at REAL NOT NULL
-);
-INSERT INTO route_runs (robot_id, route_id, route_name, map, repeat_count, state, loops_done, waypoint,
-                        run_state, message, started_at, finished_at, heartbeat, updated_at)
-  SELECT a.robot_id, a.route_id, r.name, r.map, a.repeat_count, a.state, a.loops_done, a.waypoint,
-         a.run_state, a.message, a.started_at, a.finished_at, a.heartbeat, a.updated_at
-  FROM route_assignments a JOIN routes r ON r.id = a.route_id WHERE a.started_at IS NOT NULL;
-
-CREATE TABLE route_run_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id INTEGER NOT NULL REFERENCES route_runs(id) ON DELETE CASCADE,
-  t REAL NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN {EVENT_KINDS}),
-  loop INTEGER,                         -- 그때 끝낸 바퀴 수
-  waypoint INTEGER,
-  message TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE route_assignments_v2 (
-  robot_id TEXT PRIMARY KEY REFERENCES robots(id),
-  route_id INTEGER NOT NULL REFERENCES routes(id),            -- 할당된 경로는 지울 수 없음
-  repeat_count INTEGER NOT NULL DEFAULT 1 CHECK (repeat_count BETWEEN 0 AND {MAX_REPEAT}),
-  current_run_id INTEGER REFERENCES route_runs(id) ON DELETE SET NULL,   -- 아직 시작 안 했으면 NULL
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL
-);
-INSERT INTO route_assignments_v2 (robot_id, route_id, repeat_count, current_run_id, created_at, updated_at)
-  SELECT a.robot_id, a.route_id, a.repeat_count,
-         (SELECT MAX(id) FROM route_runs x WHERE x.robot_id = a.robot_id), a.created_at, a.updated_at
-  FROM route_assignments a;
-
-DROP TABLE route_assignments;
-DROP TABLE route_points;
-DROP TABLE routes;
-DROP TABLE places;
-ALTER TABLE places_v2 RENAME TO places;
-ALTER TABLE routes_v2 RENAME TO routes;
-ALTER TABLE route_points_v2 RENAME TO route_points;
-ALTER TABLE route_assignments_v2 RENAME TO route_assignments;
-
-CREATE INDEX route_points_place ON route_points(place_id);          -- "이 지점을 쓰는 경로" 찾기
-CREATE INDEX route_assignments_route ON route_assignments(route_id);
-CREATE INDEX route_runs_robot ON route_runs(robot_id, started_at);
-CREATE INDEX route_runs_state ON route_runs(state);
-CREATE INDEX route_run_events_run ON route_run_events(run_id, t);
-''')
-
-
-MIGRATIONS = [_v1, _v2]
+MIGRATIONS = fleet_db.MIGRATIONS
 
 
 def db(path=DB_PATH):
-    return dbutil.connect(path, MIGRATIONS)
+    return fleet_db.db(path)
 
 
 # ------------------------------------------------------------------ 검증

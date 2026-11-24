@@ -116,10 +116,10 @@ flowchart LR
 **지점** 화면에서 지도를 고르고 **지도에 지점 찍기** → 지도를 클릭(클릭한 채 끌면 끈 방향이 도착 방향) → 이름을 넣고 **저장**합니다.
 로봇을 원하는 자리에 세워 두고 **로봇 위치로**에서 로봇을 고르면 그 로봇의 지도 위 위치·방향으로 채워집니다 (활성 지도일 때만).
 
-- 저장 위치: `data/places.db` 의 `places` 테이블 (`map, name, x, y, yaw, note, created_at, updated_at`). 지도마다 따로이고, 같은 지도 안에서 이름은 겹칠 수 없습니다 (지도당 최대 500개). 표 구조는 아래 [데이터베이스](#데이터베이스-sqlite).
+- 저장 위치: `data/fleet.db` 의 `places` 테이블 (`map, name, x, y, yaw, note, created_at, updated_at`). 지도마다 따로이고, 같은 지도 안에서 이름은 겹칠 수 없습니다 (지도당 최대 500개). 표 구조는 아래 [데이터베이스](#데이터베이스-sqlite).
 - 좌표는 그 지도의 `map` 프레임(m), `yaw` 는 라디안입니다. 다른 프로그램에서도 바로 읽을 수 있습니다:
   ```bash
-  sqlite3 ros2-fleet-console/data/places.db "SELECT name, x, y, yaw FROM places WHERE map = 'lab'"
+  sqlite3 ros2-fleet-console/data/fleet.db "SELECT name, x, y, yaw FROM places WHERE map = 'lab'"
   ```
 - 플릿 화면은 활성 지도의 지점을 지도에 보여 주고(레이어 **지점**), **지점으로 보내기**로 선택한 로봇에 Nav2 목표를 보냅니다.
 - API: `GET /api/places?map=<지도>`, `POST /api/places`, `PUT|DELETE /api/places/<id>` (쓰기는 관리자 토큰).
@@ -147,7 +147,7 @@ flowchart LR
 - 로봇 목록(fleet.json)에서 빠진 로봇의 할당은 "로봇 목록에서 빠짐"으로 아래에 보이고, 정지·해제만 됩니다.
 - 시작·이어서는 **운영 모드**이고 경로의 지도가 **활성 지도**일 때만 됩니다. 로봇마다 Nav2 가 떠 있고 초기 위치가 잡혀 있어야 합니다.
 - 경비 모드의 순찰 경로(`config/patrol/`)와는 별개입니다. 경비·지도 만들기로 바꾸면 이동 경로는 모두 멈춥니다.
-- 저장: `data/places.db` 의 `routes`, `route_points`, `route_assignments`(로봇·경로·`repeat_count`), `route_runs`(실행마다 상태·진행), `route_run_events`(이력). 아래 [데이터베이스](#데이터베이스-sqlite).
+- 저장: `data/fleet.db` 의 `routes`, `route_points`, `route_assignments`(로봇·경로·`repeat_count`), `route_runs`(실행마다 상태·진행), `route_run_events`(이력). 아래 [데이터베이스](#데이터베이스-sqlite).
 - API: `GET /api/routes?map=`, `POST /api/routes`, `PUT|DELETE /api/routes/<id>`, `GET /api/assignments`, `GET /api/assignments/<로봇>/runs`, `PUT|DELETE /api/assignments/<로봇>`, `POST /api/assignments/<로봇>/start|resume|pause|stop`, `POST /api/assignments/pause-all`. 멈춤·정지·pause-all 은 토큰 없이(같은 출처만), 나머지 쓰기는 관리자 토큰.
 
 ### 경비: 무엇을 경보로 보나
@@ -160,7 +160,7 @@ flowchart LR
 - 같은 곳(0.5 m)·같은 종류의 열린 경보는 새로 만들지 않고 갱신합니다 (본 횟수, 본 로봇, 상자 크기). 이상 없음/오탐으로 처리한 곳은 30분 동안 다시 알리지 않습니다.
 - 등급: 넓이 0.25 m² 이상이거나 **두 대 이상이 같은 것을 보면** 높음, 작은 새 물체는 낮음, 나머지 보통.
 - **기준 지도에 반영**: 새로 생긴 것은 벽으로, 사라진 것은 빈 칸으로 지도 그림을 고칩니다 (원본은 `.pgm.bak` 로 한 번 보관). 그 뒤로는 그 상태가 정상입니다.
-- 경보는 `data/alerts.db`(SQLite, 본 로봇은 `alert_robots`, `GET /api/alerts?robot=<id>` 로 로봇별 조회) 에 남고, `/fleet/alerts` 토픽으로 열린 모든 화면에 바로 알립니다 (토스트·소리·진동·허용 시 브라우저 알림).
+- 경보는 `data/fleet.db` 의 `alerts`(본 로봇은 `alert_robots`, `GET /api/alerts?robot=<id>` 로 로봇별 조회) 에 남고, `/fleet/alerts` 토픽으로 열린 모든 화면에 바로 알립니다 (토스트·소리·진동·허용 시 브라우저 알림).
 
 ### 이동 구역 규칙
 
@@ -197,34 +197,34 @@ flowchart LR
 
 ## 데이터베이스 (SQLite)
 
-두 파일로 나뉩니다. 경보는 자주, 지점·경로는 가끔 써서 잠금 충돌을 줄이려고 나눴습니다 (같이 조회하려면 `ATTACH`).
+모든 데이터는 **`data/fleet.db` 파일 하나**에 있습니다. 스키마는 [fleet_db.py](fleet_db.py) 에 있고, 읽고 쓰는 함수는 `places.py`(지점·경로·할당)와 `patrol_store.py`(경보)에 있습니다. 서버·경로 실행기·경비 노드가 같은 파일을 함께 쓰며, WAL 모드라 읽기는 쓰기를 기다리지 않습니다.
 
-**DB 파일은 저장소에 없습니다** (`data/` 는 `.gitignore`). 서버(`pixi run web`)를 켤 때 `data/places.db`·`data/alerts.db` 가 없으면 빈 DB 를 새로 만들고(로그: `DB 파일이 없어 새로 만듭니다`), 로봇 목록(`config/fleet.json`)과 저장된 지도(`config/maps`)로 `robots`·`maps` 를 채웁니다.
+**DB 파일은 저장소에 없습니다** (`data/` 는 `.gitignore`). 서버(`pixi run web`)를 켤 때 `data/fleet.db` 가 없으면 빈 DB 를 새로 만들고(로그: `DB 파일이 없어 새로 만듭니다`), 로봇 목록(`config/fleet.json`)과 저장된 지도(`config/maps`)로 `robots`·`maps` 를 채웁니다.
 
 - 처음부터 다시 시작하려면 서버를 끄고 `data/` 의 DB 파일(`*.db`, `*.db-wal`, `*.db-shm`, `*.bak-v*`)을 지운 뒤 다시 켭니다.
-- 서버가 켜진 채 지워도 다음 요청 때 새 파일을 만들어 다시 연결합니다. 경로 실행기는 실행 중이던 경로의 goal 을 취소하고, 경비 노드도 새 `alerts.db` 에 씁니다. (지워진 파일에 계속 써서 데이터가 사라지는 일이 없게, 연결한 파일의 inode 를 확인합니다.)
+- 서버가 켜진 채 지워도 다음 요청 때 새 파일을 만들어 다시 연결합니다. 경로 실행기는 실행 중이던 경로의 goal 을 취소하고, 경비 노드도 새 파일에 씁니다. (지워진 파일에 계속 써서 데이터가 사라지는 일이 없게, 연결한 파일의 inode 를 확인합니다.)
 
-| 파일 | 테이블 | 내용 |
+| 구분 | 테이블 | 내용 |
 | --- | --- | --- |
-| `data/places.db` | `maps` | 지도 이름. 지도 저장·서버 시작 때 `config/maps` 에서 등록 |
+| 참조 | `maps` | 지도 이름. 지도 저장·서버 시작 때 `config/maps` 에서 등록 |
 | | `robots` | 로봇. 로봇 목록 저장·서버 시작 때 `config/fleet.json` 과 맞춤. 목록에서 빠지면 지우지 않고 `active = 0` (이력 보존) |
-| | `places` | 지점 (`map` → `maps`) |
+| 지점·경로 | `places` | 지점 (`map` → `maps`) |
 | | `routes` | 이동 경로 (`map` → `maps`) |
 | | `route_points` | 경로의 지점 순서. `(route_id, map)` → `routes`, `(place_id, map)` → `places` 복합 외래 키로 **다른 지도의 지점은 DB 가 거부** |
-| | `route_assignments` | 로봇(→ `robots`)마다 경로 하나, `repeat_count`(0 = 계속), 지금 실행 `current_run_id` |
+| 경로 실행 | `route_assignments` | 로봇(→ `robots`)마다 경로 하나, `repeat_count`(0 = 계속), 지금 실행 `current_run_id` |
 | | `route_runs` | 시작할 때마다 한 줄: 상태(`running` `paused` `done` `failed` `stopped`), `loops_done`, `waypoint`, 시각. 실행기가 진행을 씀 |
 | | `route_run_events` | 실행 안에서 일어난 일 (`start` `resume` `pause` `stop` `loop` `done` `fail` `edit`) |
-| `data/alerts.db` | `alerts` | 경비 경보 (`kind`·`status`·`severity` 값은 트리거로 검사) |
-| | `alert_robots` | 경보를 본 로봇마다 한 줄 (처음·마지막 본 시각, 횟수) |
+| 경비 | `alerts` | 경비 경보 (`map` → `maps`) |
+| | `alert_robots` | 경보를 본 로봇(→ `robots`)마다 한 줄 (처음·마지막 본 시각, 횟수) |
 
-- **값 검사**: 좌표 범위, 방향(−π..π), 이름 길이, 반복 횟수(0~10000), 상태 값은 CHECK 제약으로 DB 가 직접 막습니다. `sqlite3` 로 직접 고쳐도 깨지지 않습니다. "같은 지점을 연달아 넣지 않기"만 앱에서 검사합니다.
+- **값 검사**: 좌표 범위, 방향(−π..π), 이름 길이, 반복 횟수(0~10000), 실행·경보의 상태 값은 CHECK 제약으로 DB 가 직접 막습니다. `sqlite3` 로 직접 고쳐도 깨지지 않습니다. "같은 지점을 연달아 넣지 않기"만 앱에서 검사합니다.
 - **지우기 규칙**: 경로에서 쓰는 지점, 로봇에 할당된 경로는 지울 수 없습니다. 경로를 지우면 실행 이력의 `route_id` 는 비고 `route_name` 은 남습니다. 할당을 해제해도 실행 이력은 남습니다.
-- **스키마 버전**: `PRAGMA user_version` 으로 관리합니다 (지금 둘 다 2). 서버를 켤 때 낮은 버전이면 순서대로 바꾸고, 바꾸기 전에 `<파일>.bak-v<이전 버전>` 으로 백업합니다. 실패하면 그 단계 전체를 되돌리고 서버가 멈춥니다 (DB 는 이전 그대로). 새 변경은 `places.py`·`patrol_store.py` 의 `MIGRATIONS` 끝에 함수를 하나 더하면 됩니다.
-- `alerts.db` 의 로봇 id 는 `places.db` 의 `robots` 와 같은 값이지만 파일이 달라 외래 키는 걸 수 없습니다.
+- **스키마 버전**: `PRAGMA user_version` 으로 관리합니다 (지금 1). 나중에 스키마를 바꿀 때는 `fleet_db.py` 의 `MIGRATIONS` 끝에 함수를 하나 더합니다. 서버를 켤 때 낮은 버전이면 순서대로 바꾸고, 바꾸기 전에 `data/fleet.db.bak-v<이전 버전>` 으로 백업하며, 실패하면 그 단계 전체를 되돌리고 서버가 멈춥니다 (DB 는 이전 그대로).
+- 예전에 쓰던 `data/places.db`·`data/alerts.db` 는 더 이상 쓰지 않습니다 (옮기지 않음). 남아 있으면 서버가 시작할 때 알려 주며, 지워도 됩니다.
 
 ```bash
-sqlite3 ros2-fleet-console/data/places.db "SELECT a.robot_id, r.name, a.repeat_count, x.state, x.loops_done FROM route_assignments a JOIN routes r ON r.id = a.route_id LEFT JOIN route_runs x ON x.id = a.current_run_id"
-sqlite3 ros2-fleet-console/data/places.db "SELECT datetime(t, 'unixepoch', 'localtime'), kind, loop, message FROM route_run_events WHERE run_id = 3 ORDER BY t"
+sqlite3 ros2-fleet-console/data/fleet.db "SELECT a.robot_id, r.name, a.repeat_count, x.state, x.loops_done FROM route_assignments a JOIN routes r ON r.id = a.route_id LEFT JOIN route_runs x ON x.id = a.current_run_id"
+sqlite3 ros2-fleet-console/data/fleet.db "SELECT datetime(t, 'unixepoch', 'localtime'), kind, loop, message FROM route_run_events WHERE run_id = 3 ORDER BY t"
 ```
 
 ## 구조
@@ -239,16 +239,16 @@ ros2-fleet-console/
   config/masks/<이름>/<ns>.yaml|pgm 로봇별 keepout 마스크 (구역 저장 때 생성)
   config/mode.json       현재 운영 모드 (운영 / 지도 만들기 / 경비)
   config/patrol/<이름>.json        그 지도의 순찰 경로(로봇별)와 감지 설정
-  data/alerts.db         경보 (SQLite, 스키마 버전 2)
-  data/places.db         지도·로봇 참조, 지점, 이동 경로, 할당, 실행 이력 (SQLite, 스키마 버전 2)
-  data/*.bak-v<n>        스키마를 올리기 전 자동 백업
+  data/fleet.db          SQLite DB 하나: 지도·로봇 참조, 지점, 이동 경로, 할당, 실행 이력, 경보 (서버를 켤 때 없으면 생성)
+  data/fleet.db.bak-v<n> 스키마를 올리기 전 자동 백업
   logs/mapping.log, logs/patrol.log, logs/routes.log  지도 만들기·경비·이동 경로 프로세스 로그
   launch/web.launch.py   rosbridge(+rosapi) 와 serve.py 실행 (bind 인자)
   serve.py               정적 파일 + /api/fleet · control · maps · zones · places · routes · assignments · mapping · mode · patrol · alerts, 경비 감시(재시작)
   maps.py                지도 목록·이미지, 구역 검증, 마스크 생성, 기준 지도 반영, 지도 만들기·경비 프로세스 관리
-  dbutil.py              SQLite 연결 + 스키마 버전 마이그레이션 (백업, 실패 시 되돌림)
+  fleet_db.py            DB 스키마 (테이블·제약·인덱스) 와 연결
+  dbutil.py              SQLite 연결 + 없으면 생성 + 스키마 버전 마이그레이션 (백업, 실패 시 되돌림)
   patrol_store.py        모드 파일, 순찰 설정 검증, 경보 DB
-  places.py              지점·경로·할당·실행 이력 DB (스키마, 검증, CRUD, 로봇·지도 동기화, 실행기용 진행 기록)
+  places.py              지점·경로·할당·실행 이력 (검증, CRUD, 로봇·지도 동기화, 실행기용 진행 기록)
   robot/tb3_ns.launch.py    TurtleBot3 네임스페이스 + TF 분리 래퍼 (로봇에서 실행)
   robot/pinky_ns.launch.py  Pinky Pro 네임스페이스 + TF 분리 래퍼 (로봇에서 실행)
   robot/nav2_ns.launch.py   로봇별 Nav2 + keepout 필터 (PC 에서 실행)

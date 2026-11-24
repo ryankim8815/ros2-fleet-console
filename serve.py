@@ -16,7 +16,7 @@
 - GET  /api/alerts?map=&status=open&robot= : 경보 목록 (robot: 그 로봇이 본 경보만), GET /api/alerts/<id> : 상세(주변 스캔 포함)
 - POST /api/alerts/<id> {status}    : 이상 없음(ok) / 오탐(false) / 다시 열기(open)
 - POST /api/alerts/<id>/baseline    : 기준 지도에 반영 (토큰)
-- GET  /api/places?map=<지도>       : 그 지도의 이름 붙인 지점 목록 (data/places.db)
+- GET  /api/places?map=<지도>       : 그 지도의 이름 붙인 지점 목록
 - POST /api/places {map,name,x,y,yaw,note} : 지점 추가 (토큰)
 - PUT  /api/places/<id>, DELETE /api/places/<id> : 지점 고치기·지우기 (토큰)
 - GET  /api/routes?map=<지도>       : 이동 경로 목록 (지점 순서 포함)
@@ -27,6 +27,7 @@
 - POST /api/assignments/<로봇>/start|resume : 시작(처음부터)·이어서 (토큰, 운영 모드·활성 지도만)
 - POST /api/assignments/<로봇>/pause|stop, POST /api/assignments/pause-all : 멈춤·정지 (토큰 불필요, 같은 출처만)
 
+데이터는 SQLite 파일 하나(data/fleet.db, 스키마는 fleet_db.py)에 있고, 서버를 켤 때 없으면 만듭니다.
 쓰기 요청은 같은 출처(Origin = Host)만 허용합니다. rosbridge 자체에는 인증이 없으므로
 신뢰할 수 있는 네트워크에서만 사용하세요.
 """
@@ -47,6 +48,7 @@ import urllib.parse
 import sqlite3
 
 import dbutil
+import fleet_db
 import maps
 import patrol_store as store
 import places
@@ -265,32 +267,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path == '/api/alerts':
                 q = self._query()
                 with DB_LOCK:
-                    con = store.db()
+                    con = DB()
                     items = store.list_alerts(con, q.get('map') or None, q.get('status'), q.get('limit', 100), int(q.get('since', 0)),
                                               q.get('robot') or None)
                     cnt = store.counts(con, q['map']) if q.get('map') else None
                 return self._json(200, {'alerts': items, 'counts': cnt})
             if path == '/api/routes':
                 name = self._query().get('map', '')
-                with PLACES_LOCK:
-                    return self._json(200, {'map': name, 'routes': places.list_routes(PLACES_DB(), name)})
+                with DB_LOCK:
+                    return self._json(200, {'map': name, 'routes': places.list_routes(DB(), name)})
             if path == '/api/assignments':
-                with PLACES_LOCK:
-                    items = places.list_assignments(PLACES_DB())
+                with DB_LOCK:
+                    items = places.list_assignments(DB())
                 return self._json(200, {'assignments': items, 'runner': ROUTES.status(), 'mode': store.read_mode()['mode'],
                                         'map': read_fleet().get('mapFile')})
             m = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})/runs$', path)
             if m:
-                with PLACES_LOCK:
-                    return self._json(200, {'robot': m.group(1), 'runs': places.list_runs(PLACES_DB(), m.group(1), int(self._query().get('limit', 10)))})
+                with DB_LOCK:
+                    return self._json(200, {'robot': m.group(1), 'runs': places.list_runs(DB(), m.group(1), int(self._query().get('limit', 10)))})
             if path == '/api/places':
                 name = self._query().get('map', '')
-                with PLACES_LOCK:
-                    return self._json(200, {'map': name, 'places': places.list_places(PLACES_DB(), name)})
+                with DB_LOCK:
+                    return self._json(200, {'map': name, 'places': places.list_places(DB(), name)})
             m = re.match(r'^/api/alerts/(\d+)$', path)
             if m:
                 with DB_LOCK:
-                    a = store.get_alert(store.db(), int(m.group(1)))
+                    a = store.get_alert(DB(), int(m.group(1)))
                 return self._json(200, a) if a else self._json(404, {'error': '없는 경보입니다'})
         except FileNotFoundError:
             return self._json(404, {'error': '없는 지도입니다'})
@@ -313,7 +315,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if st == 'baseline':
                     return self._json(400, {'error': '기준 지도 반영은 /api/alerts/<id>/baseline (토큰)'})
                 with DB_LOCK:
-                    return self._json(200, store.set_status(store.db(), int(m.group(1)), st, body.get('note', '')))
+                    return self._json(200, store.set_status(DB(), int(m.group(1)), st, body.get('note', '')))
         except KeyError:
             return self._json(404, {'error': '없는 경보입니다'})
         except (ValueError, json.JSONDecodeError) as e:
@@ -325,8 +327,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._routes_write('create')
         # 멈춤·정지(안전 쪽)는 토큰 없이, 시작·이어서(로봇이 스스로 움직임)는 토큰
         if path == '/api/assignments/pause-all':
-            with PLACES_LOCK:
-                n = places.pause_all(PLACES_DB(), '비상정지')
+            with DB_LOCK:
+                n = places.pause_all(DB(), '비상정지')
             return self._json(200, {'paused': n})
         ma = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})/(start|resume|pause|stop)$', path)
         if ma:
@@ -350,7 +352,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json(200, set_mode(str(body.get('mode', ''))))
             if m.group(3):
                 with DB_LOCK:
-                    con = store.db()
+                    con = DB()
                     a = store.get_alert(con, int(m.group(3)))
                     if not a:
                         return self._json(404, {'error': '없는 경보입니다'})
@@ -367,8 +369,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if m.group(2) == 'stop':
                 return self._json(200, MAPPING.stop())
             saved = MAPPING.save(str(body.get('name', '')))
-            with PLACES_LOCK:
-                places.ensure_map(PLACES_DB(), saved['name'])
+            with DB_LOCK:
+                places.ensure_map(DB(), saved['name'])
             return self._json(200, saved)
         except FileNotFoundError as e:
             return self._json(500, {'error': f'파일을 찾지 못했습니다 (ROS 환경에서 실행했는지, 지도가 있는지 확인): {e}'})
@@ -381,8 +383,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return None
         try:
             body = self._body() if action != 'delete' else {}
-            with PLACES_LOCK:
-                con = PLACES_DB()
+            with DB_LOCK:
+                con = DB()
                 if action == 'create':
                     maps.map_info(str(body.get('map', '')))    # 저장된 지도인지 확인
                     return self._json(201, places.create_place(con, body))
@@ -404,8 +406,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return None
         try:
             body = self._body() if action in ('create', 'update', 'assign') else {}
-            with PLACES_LOCK:
-                con = PLACES_DB()
+            with DB_LOCK:
+                con = DB()
                 if action == 'create':
                     maps.map_info(str(body.get('map', '')))
                     return self._json(201, places.create_route(con, body))
@@ -465,8 +467,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json(200, store.write_patrol(mp.group(1), self._body(), ids))
             data = validate_fleet(self._body())
             write_fleet(data)
-            with PLACES_LOCK:   # robots 테이블도 맞춤 (빠진 로봇은 active = 0, 이력은 남김)
-                places.sync_robots(PLACES_DB(), data['robots'])
+            with DB_LOCK:   # robots 테이블도 맞춤 (빠진 로봇은 active = 0, 이력은 남김)
+                places.sync_robots(DB(), data['robots'])
             return self._json(200, data)
         except FileNotFoundError:
             return self._json(404, {'error': '없는 지도입니다'})
@@ -477,20 +479,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 MAPPING = maps.Mapping()
 PATROL = maps.Patrol()
 ROUTES = maps.RouteRunner()
-DB_LOCK = threading.Lock()
-PLACES_LOCK = threading.Lock()
-_places_con = None
+DB_LOCK = threading.RLock()   # data/fleet.db 연결 하나를 모든 요청 스레드가 이 잠금으로 나눠 씀
+_db_con = None
 
 
-def PLACES_DB():
-    """places.db 연결 하나를 PLACES_LOCK 과 함께 재사용. 파일이 없으면(처음·실행 중 지워짐) 새로 만들고
-    로봇·지도 목록을 다시 채움 (할당·지점의 외래 키 대상)."""
-    global _places_con
-    _places_con, fresh = dbutil.ensure(_places_con, places.DB_PATH, places.MIGRATIONS)
+def DB():
+    """data/fleet.db 연결 (DB_LOCK 안에서). 파일이 없으면(처음·실행 중 지워짐) 새로 만들고
+    로봇·지도 목록을 다시 채움 (지점·할당·경보의 외래 키 대상)."""
+    global _db_con
+    _db_con, fresh = dbutil.ensure(_db_con, fleet_db.DB_PATH, fleet_db.MIGRATIONS)
     if fresh:
-        places.sync_robots(_places_con, read_fleet().get('robots', []))
-        places.sync_maps(_places_con, [m['name'] for m in maps.list_maps()])
-    return _places_con
+        places.sync_robots(_db_con, read_fleet().get('robots', []))
+        places.sync_maps(_db_con, [m['name'] for m in maps.list_maps()])
+    return _db_con
 MODE_LOCK = threading.RLock()
 WATCHDOG = {'restarts': 0, 'last': None}
 
@@ -508,14 +509,14 @@ def assignment_action(robot_id, action):
             mode = store.read_mode()['mode']
             if mode != 'operate':
                 raise ValueError(f'운영 모드에서만 경로를 시작할 수 있습니다 (지금: {mode})')
-        with PLACES_LOCK:
-            a = places.control_assignment(PLACES_DB(), robot_id, action, read_fleet().get('mapFile'))
+        with DB_LOCK:
+            a = places.control_assignment(DB(), robot_id, action, read_fleet().get('mapFile'))
         if action in ('start', 'resume') and not ROUTES.running():
             try:
-                ROUTES.start(FLEET_PATH, places.DB_PATH)
+                ROUTES.start(FLEET_PATH, fleet_db.DB_PATH)
             except Exception as e:  # noqa: BLE001
-                with PLACES_LOCK:
-                    places.pause_all(PLACES_DB(), f'실행기를 시작하지 못함: {e}')
+                with DB_LOCK:
+                    places.pause_all(DB(), f'실행기를 시작하지 못함: {e}')
                 raise ValueError(f'경로 실행기를 시작하지 못했습니다 (ROS 환경에서 실행했는지 확인): {e}') from e
     return {'assignment': a, 'runner': ROUTES.status()}
 
@@ -527,13 +528,13 @@ def route_watchdog():
         time.sleep(wait)
         try:
             with MODE_LOCK:
-                with PLACES_LOCK:
-                    busy = places.any_running(PLACES_DB())
+                with DB_LOCK:
+                    busy = places.any_running(DB())
                 if not busy or ROUTES.running() or store.read_mode()['mode'] != 'operate':
                     wait = 5
                     continue
                 print(f'경로 실행기가 멈춰 있어 다시 시작합니다 (exit={ROUTES.status().get("exited")})', flush=True)
-                ROUTES.start(FLEET_PATH, places.DB_PATH)
+                ROUTES.start(FLEET_PATH, fleet_db.DB_PATH)
                 wait = min(60, wait * 2)
         except Exception as e:  # noqa: BLE001
             print(f'경로 실행기 감시 오류: {e}', flush=True)
@@ -551,7 +552,7 @@ def patrol_watchdog():
                     continue
                 st = PATROL.status()
                 print(f'경비 프로세스가 멈춰 있어 다시 시작합니다 (exit={st.get("exited")})', flush=True)
-                PATROL.start(read_fleet().get('mapFile'), FLEET_PATH, store.DB_PATH)
+                PATROL.start(read_fleet().get('mapFile'), FLEET_PATH, fleet_db.DB_PATH)
                 WATCHDOG['restarts'] += 1
                 WATCHDOG['last'] = time.time()
                 wait = min(60, wait * 2)
@@ -569,8 +570,8 @@ def set_mode(mode):
 
 def _set_mode(mode):
     if mode != 'operate':   # 경비·지도 만들기는 로봇을 따로 움직이므로 이동 경로는 멈춤 (나중에 이어서 가능)
-        with PLACES_LOCK:
-            places.pause_all(PLACES_DB(), '모드 변경으로 멈춤')
+        with DB_LOCK:
+            places.pause_all(DB(), '모드 변경으로 멈춤')
         ROUTES.stop()
     if mode == 'patrol':
         map_name = read_fleet().get('mapFile')
@@ -578,7 +579,7 @@ def _set_mode(mode):
             raise ValueError('활성 지도가 없습니다. 먼저 지도를 만들고 활성 지도로 지정하세요')
         MAPPING.stop()
         if not PATROL.running():
-            PATROL.start(map_name, FLEET_PATH, store.DB_PATH)
+            PATROL.start(map_name, FLEET_PATH, fleet_db.DB_PATH)
     else:
         PATROL.stop()
         if mode != 'mapping':
@@ -594,15 +595,18 @@ def main():
     ap.add_argument('--dir', default=os.path.join(APP_DIR, 'web'))
     a = ap.parse_args()
     admin_token()  # 없으면 생성
-    # DB 파일이 없으면 여기서 만듦 (data/places.db, data/alerts.db). 있으면 스키마 버전을 확인해 필요하면 올림
-    with PLACES_LOCK:
-        con = PLACES_DB()
+    # DB 파일(data/fleet.db)이 없으면 여기서 만듦. 있으면 스키마 버전을 확인해 필요하면 올림
+    with DB_LOCK:
+        con = DB()
         places.sync_robots(con, read_fleet().get('robots', []))
         places.sync_maps(con, [m['name'] for m in maps.list_maps()])
         # 서버를 다시 켜도 로봇이 혼자 경로를 이어 가지 않게: 실행 중이던 경로는 멈춤
         n = places.pause_all(con, '서버 재시작으로 멈춤 (경로 화면에서 이어서)')
-    store.db().close()    # alerts.db 도 시작할 때 만들거나 버전을 올림 (경비 노드보다 먼저)
-    print(f'DB: {places.DB_PATH} (버전 {dbutil.version(con)}), {store.DB_PATH}', flush=True)
+        ver = dbutil.version(con)
+    print(f'DB: {fleet_db.DB_PATH} (스키마 버전 {ver})', flush=True)
+    old = [f for f in ('places.db', 'alerts.db') if os.path.exists(os.path.join(os.path.dirname(fleet_db.DB_PATH), f))]
+    if old:   # DB 를 하나로 합치기 전의 파일 (자동으로 옮기지 않음)
+        print(f'참고: data/ 의 {", ".join(old)} (-wal, -shm, .bak-v* 포함)는 더 이상 쓰지 않습니다. 필요 없으면 지워도 됩니다', flush=True)
     if n:
         print(f'실행 중이던 이동 경로 {n}개를 멈춤 상태로 바꿨습니다', flush=True)
     if store.read_mode()['mode'] == 'patrol':   # 다시 켰을 때 경비 모드였으면 이어서

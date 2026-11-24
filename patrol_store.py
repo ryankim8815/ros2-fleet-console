@@ -4,11 +4,7 @@ serve.py 와 robot/patrol_node.py 가 함께 씁니다.
 
   config/mode.json             {"mode": "operate"|"mapping"|"patrol", "since": epoch, "by": ...}
   config/patrol/<지도>.json    {"routes": {robot_id: {"points": [[x,y],...], "enabled": true}}, "settings": {...}}
-  data/alerts.db               경보 (스키마 버전 2, PRAGMA user_version)
-    alerts         경보 한 건 (위치·크기·등급·처리 상태·발견 당시 스캔)
-    alert_robots   그 경보를 본 로봇마다 한 줄 (처음·마지막 본 시각, 횟수) → 로봇별 검색
-  로봇 id 는 data/places.db 의 robots 와 같은 값이지만 다른 파일이라 외래 키는 걸 수 없습니다
-  (경보는 자주, 지점은 가끔 써서 파일을 나눠 잠금 충돌을 줄임).
+  data/fleet.db (fleet_db.py)  경보: alerts (한 건), alert_robots (본 로봇마다 한 줄, robots 외래 키 → 로봇별 검색)
 """
 import json
 import os
@@ -16,13 +12,13 @@ import re
 import tempfile
 import time
 
-import dbutil
+import fleet_db
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(APP_DIR, 'config')
 MODE_PATH = os.path.join(CONFIG, 'mode.json')
 PATROL_DIR = os.path.join(CONFIG, 'patrol')
-DB_PATH = os.path.join(APP_DIR, 'data', 'alerts.db')
+DB_PATH = fleet_db.DB_PATH
 
 MODES = ('operate', 'mapping', 'patrol')
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$')
@@ -37,61 +33,7 @@ DEFAULT_SETTINGS = {
     'escalate': True,      # 다른 로봇이 같은 곳을 다시 보면 등급 올리기
 }
 
-SCHEMA_V1 = '''
-CREATE TABLE IF NOT EXISTS alerts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  map TEXT NOT NULL,
-  kind TEXT NOT NULL,              -- new (새로 생긴 것) | missing (사라진 것)
-  x REAL, y REAL, w REAL, h REAL,  -- 중심과 크기 (map 프레임, m)
-  area REAL,
-  first_seen REAL, last_seen REAL,
-  robots TEXT,                     -- JSON 로봇 id 목록
-  seen INTEGER DEFAULT 1,          -- 확인된 횟수
-  severity TEXT,                   -- high | medium | low
-  status TEXT DEFAULT 'open',      -- open | ok (이상 없음) | false (오탐) | baseline (기준 지도에 반영)
-  note TEXT DEFAULT '',
-  scan TEXT,                       -- 발견 당시 주변 스캔 점 JSON [[x,y],...]
-  handled_at REAL
-);
-CREATE INDEX IF NOT EXISTS alerts_status ON alerts(map, status);
-'''
-
-
-def _v1(con):
-    """버전 1: 버전 관리 전의 구조 (alerts.robots 는 JSON 배열)"""
-    dbutil.script(con, SCHEMA_V1)
-
-
-def _v2(con):
-    """버전 2: 본 로봇을 alert_robots 로 분리 (로봇별 검색), 목록 정렬용 인덱스, 상태 값 CHECK"""
-    dbutil.script(con, '''
-CREATE TABLE alert_robots (
-  alert_id INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
-  robot_id TEXT NOT NULL,          -- data/places.db robots.id (다른 파일이라 외래 키 없음)
-  first_seen REAL NOT NULL,
-  last_seen REAL NOT NULL,
-  seen INTEGER NOT NULL DEFAULT 1 CHECK (seen >= 1),
-  PRIMARY KEY (alert_id, robot_id)
-);
-INSERT INTO alert_robots (alert_id, robot_id, first_seen, last_seen, seen)
-  SELECT a.id, j.value, COALESCE(a.first_seen, a.last_seen, 0), COALESCE(a.last_seen, a.first_seen, 0), 1
-  FROM alerts a, json_each(COALESCE(a.robots, '[]')) j
-  WHERE j.type = 'text';
-CREATE INDEX alert_robots_robot ON alert_robots(robot_id, last_seen);
-CREATE INDEX alerts_recent ON alerts(map, last_seen);
-CREATE TRIGGER alerts_check_insert BEFORE INSERT ON alerts
-  WHEN NEW.kind NOT IN ('new', 'missing') OR NEW.status NOT IN ('open', 'ok', 'false', 'baseline')
-    OR NEW.severity NOT IN ('high', 'medium', 'low')
-  BEGIN SELECT RAISE(ABORT, 'alerts: kind/status/severity 값이 올바르지 않습니다'); END;
-CREATE TRIGGER alerts_check_update BEFORE UPDATE OF kind, status, severity ON alerts
-  WHEN NEW.kind NOT IN ('new', 'missing') OR NEW.status NOT IN ('open', 'ok', 'false', 'baseline')
-    OR NEW.severity NOT IN ('high', 'medium', 'low')
-  BEGIN SELECT RAISE(ABORT, 'alerts: kind/status/severity 값이 올바르지 않습니다'); END;
-ALTER TABLE alerts DROP COLUMN robots;
-''')
-
-
-MIGRATIONS = [_v1, _v2]
+MIGRATIONS = fleet_db.MIGRATIONS
 
 
 def _atomic_json(path, obj):
@@ -170,7 +112,14 @@ def write_patrol(map_name, data, robot_ids):
 
 # ------------------------------------------------------------------ 경보 DB
 def db(path=DB_PATH):
-    return dbutil.connect(path, MIGRATIONS)   # 노드·서버의 여러 스레드에서 (잠금은 호출하는 쪽)
+    return fleet_db.db(path)   # 노드·서버의 여러 스레드에서 (잠금은 호출하는 쪽)
+
+
+def ensure_refs(con, map_name, robot_id, now):
+    """경보를 쓰기 전: 지도·로봇 참조 행이 없으면 최소한으로 만듦 (DB 가 막 새로 만들어졌어도 외래 키가 맞게).
+    이름 등은 서버의 sync_robots·sync_maps 가 나중에 채움. 트랜잭션 안에서 부름."""
+    con.execute('INSERT OR IGNORE INTO maps (name, created_at) VALUES (?, ?)', (map_name, now))
+    con.execute('INSERT OR IGNORE INTO robots (id, updated_at) VALUES (?, ?)', (robot_id, now))
 
 
 def alert_robot_ids(con, aid):

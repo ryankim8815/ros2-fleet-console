@@ -1,4 +1,4 @@
-// 이동 경로: 지점을 순서대로 이은 경로 CRUD + 로봇별 경로 할당(반복 횟수)·시작/멈춤/이어서/정지 (data/places.db)
+// 이동 경로: 지점을 순서대로 이은 경로 CRUD + 로봇별 경로 할당(반복 횟수)·시작/멈춤/이어서/정지 (data/fleet.db)
 window.App.ready.then(async (App) => {
   'use strict';
   const { $, esc, toast } = App;

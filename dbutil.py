@@ -1,6 +1,6 @@
 """SQLite 공용: 연결 열기(파일이 없으면 새로 만듦) + 스키마 버전(PRAGMA user_version) 마이그레이션.
 
-DB 파일(data/places.db, data/alerts.db)은 저장소에 넣지 않습니다. 서버를 켤 때 없으면 만들고,
+DB 파일(data/fleet.db)은 저장소에 넣지 않습니다. 서버를 켤 때 없으면 만들고,
 실행 중에 지워져도 다음 사용 때 ensure() 가 새 파일을 만들어 다시 연결합니다.
 
 마이그레이션은 버전 순서대로 한 번씩만 실행됩니다 (MIGRATIONS[i] 가 버전 i → i+1).

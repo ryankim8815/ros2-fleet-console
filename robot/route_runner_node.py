@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """이동 경로 실행기 (PC 에서, serve.py 가 경로를 시작할 때 띄움).
 
-data/places.db 에서 할당(route_assignments)의 지금 실행(route_runs, state = 'running')마다:
+data/fleet.db 에서 할당(route_assignments)의 지금 실행(route_runs, state = 'running')마다:
   - 경로 지점들(places 좌표·방향)을 Nav2 FollowWaypoints(/<ns>/follow_waypoints)로 한 바퀴씩 보냄
   - 한 바퀴를 끝내면 loops_done + 1 (이력 'loop'), repeat_count 만큼 돌면 state = 'done' (0 이면 멈출 때까지 계속)
   - 진행 중인 지점 순번(waypoint)을 기록해 두어, 멈췄다 이어 가면 그 지점부터 다시 감

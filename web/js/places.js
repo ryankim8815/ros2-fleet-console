@@ -1,4 +1,4 @@
-// 지점: 저장된 지도 위에 좌표를 찍고 이름을 붙여 SQLite(data/places.db)에 저장
+// 지점: 저장된 지도 위에 좌표를 찍고 이름을 붙여 SQLite(data/fleet.db)에 저장
 window.App.ready.then(async (App) => {
   'use strict';
   const { $, esc, toast } = App;
