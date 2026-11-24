@@ -24,4 +24,16 @@ else
   exit 1
 fi
 
+# ros2_ws/install (ros2_ws/build.sh 로 빌드한 인터페이스 패키지, 예: turtlebot3_msgs)이 있으면 함께 불러옴
+# → rosbridge·ros2 CLI 가 그 타입을 앎. 없으면 RoboStack 환경만.
+ws_install="$project_root/ros2_ws/install"
+if [[ -d "$ws_install/share" ]]; then
+  exec "$conda_exe" run --no-capture-output --prefix "$ros_prefix" bash -c '
+    ws="$1"; shift
+    py=$(ls -d "$ws"/lib/python3.*/site-packages 2>/dev/null | head -1)
+    export AMENT_PREFIX_PATH="$ws${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
+    export LD_LIBRARY_PATH="$ws/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    [[ -n "$py" ]] && export PYTHONPATH="$py${PYTHONPATH:+:$PYTHONPATH}"
+    exec ros2 "$@"' _ "$ws_install" "$@"
+fi
 exec "$conda_exe" run --no-capture-output --prefix "$ros_prefix" ros2 "$@"

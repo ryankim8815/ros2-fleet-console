@@ -10,3 +10,8 @@ data/
 
 # 편집기 설정·코드 검색 캐시 (PC 마다 다름, browse.vc.db 는 수 GB)
 .vscode/
+
+# ros2_ws 빌드 결과 (소스 ros2_ws/src 는 저장소에 넣음, ./ros2_ws/build.sh 로 다시 만듦)
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/

@@ -29,6 +29,20 @@ pixi run web bind:=127.0.0.1                # 이 PC 에서만 접속 (웹·rosb
 ./bin/ros2 run rosbridge_server rosbridge_websocket
 ```
 
+### 로봇 인터페이스 패키지 (ros2_ws)
+
+웹이 로봇 서비스를 부르려면 PC 의 rosbridge 가 그 타입을 알아야 합니다. RoboStack 에 이 환경(Python 3.14)용이 없는 패키지는 `ros2_ws/src` 에 소스로 두고 빌드합니다. `bin/ros2`(따라서 `pixi run web`)는 `ros2_ws/install` 이 있으면 자동으로 함께 불러옵니다.
+
+| 패키지 | 쓰는 곳 | 출처 |
+| --- | --- | --- |
+| `turtlebot3_msgs` 2.4.0 | TurtleBot3 사운드 `/sound` (`turtlebot3_msgs/srv/Sound`) | ROBOTIS-GIT/turtlebot3_msgs `jazzy` (커밋 9209e01, 2025-04-30) |
+
+```bash
+./ros2_ws/build.sh        # 처음 한 번, 소스를 바꾼 뒤 (빌드 결과 ros2_ws/build·install 은 저장소에 넣지 않음)
+```
+
+빌드한 뒤에는 웹 서버를 다시 켜야 rosbridge 에 반영됩니다. 패키지를 더하려면 소스를 `ros2_ws/src/<패키지>` 에 넣고 `build.sh` 의 `packages` 목록에 이름을 넣습니다.
+
 ### 운영 모드
 
 플릿 전체가 하나의 모드로 움직입니다. 상단바의 **모드 칩**을 눌러 바꿉니다 (관리자 토큰 필요).
@@ -272,7 +286,7 @@ ros2-fleet-console/
 ## 알려진 제약
 
 - 로봇 없이 PC 에서 가짜 로봇으로 시험한 결과: [docs/test-report.md](docs/test-report.md). **실제 TurtleBot3·Pinky Pro 로는 아직 시험하지 않았습니다.**
-- PC 의 `ros2_ws/src/pinky_interfaces` 는 Pinky Pro 공개 저장소의 인터페이스 패키지 사본입니다 (LED·표정 서비스 타입을 rosbridge 가 알기 위함).
+- Pinky LED·표정 서비스 타입(`pinky_interfaces`)은 아직 이 PC 의 `ros2_ws` 에 없습니다. Pinky Pro 공개 저장소의 인터페이스 패키지를 `ros2_ws/src/pinky_interfaces` 에 넣고 빌드해야 웹에서 LED·표정을 바꿀 수 있습니다 ([로봇 인터페이스 패키지](#로봇-인터페이스-패키지-ros2_ws)).
 - rosbridge 2.7.1 의 `/rosapi/action_type` 은 rosapi 를 종료시키므로 쓰지 않습니다 (액션 타입은 이름으로 추정).
 - `/map` 은 PNG 압축으로 3초 간격으로 받습니다 (1000×1000 지도 2.97 MB → 44 KB).
 - 플릿 화면은 통신량을 줄이려고 odom 을 최대 10 Hz, LiDAR 는 2초 간격(선택 로봇을 LiDAR 레이어로 볼 때만 0.2초)으로 받습니다. 한 로봇의 정확한 주기는 로봇 대시보드에서 봅니다.
