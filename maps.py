@@ -419,3 +419,19 @@ class Patrol(_Proc):
             cmd = [sys.executable, PATROL_NODE, '--ros-args', '-p', f'map_name:={map_name}', '-p', f'fleet:={fleet_path}',
                    '-p', f'db:={db_path}', '-p', f'config_dir:={CONFIG}']
             return self._start(cmd, {'map': map_name})
+
+
+ROUTE_RUNNER = os.path.join(APP_DIR, 'robot', 'route_runner_node.py')
+
+
+class RouteRunner(_Proc):
+    """이동 경로 실행기: route_runner_node.py (data/places.db 의 실행 중인 할당을 Nav2 FollowWaypoints 로 반복)."""
+
+    def __init__(self):
+        super().__init__('routes.log')
+
+    def start(self, fleet_path, db_path):
+        import sys
+        with self.lock:
+            cmd = [sys.executable, ROUTE_RUNNER, '--ros-args', '-p', f'fleet:={fleet_path}', '-p', f'db:={db_path}']
+            return self._start(cmd, {})

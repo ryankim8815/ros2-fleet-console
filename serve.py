@@ -13,9 +13,19 @@
 - POST /api/mapping/start|stop|save : 여러 로봇 slam_toolbox + 지도 합치기 실행·정지, 저장 (토큰)
 - GET  /api/mode, POST /api/mode    : 운영 모드 (operate | mapping | patrol, 바꾸기는 토큰)
 - GET/PUT /api/patrol/<지도>        : 순찰 경로·감지 설정 (저장은 토큰)
-- GET  /api/alerts?map=&status=open : 경보 목록, GET /api/alerts/<id> : 상세(주변 스캔 포함)
+- GET  /api/alerts?map=&status=open&robot= : 경보 목록 (robot: 그 로봇이 본 경보만), GET /api/alerts/<id> : 상세(주변 스캔 포함)
 - POST /api/alerts/<id> {status}    : 이상 없음(ok) / 오탐(false) / 다시 열기(open)
 - POST /api/alerts/<id>/baseline    : 기준 지도에 반영 (토큰)
+- GET  /api/places?map=<지도>       : 그 지도의 이름 붙인 지점 목록 (data/places.db)
+- POST /api/places {map,name,x,y,yaw,note} : 지점 추가 (토큰)
+- PUT  /api/places/<id>, DELETE /api/places/<id> : 지점 고치기·지우기 (토큰)
+- GET  /api/routes?map=<지도>       : 이동 경로 목록 (지점 순서 포함)
+- POST /api/routes {map,name,note,points:[지점 id..]}, PUT|DELETE /api/routes/<id> : 경로 CRUD (토큰)
+- GET  /api/assignments             : 로봇별 경로 할당·지금 실행의 진행 + 실행기 상태
+- GET  /api/assignments/<로봇>/runs : 그 로봇의 최근 실행과 이력 (시작·멈춤·바퀴 완료·실패 …)
+- PUT  /api/assignments/<로봇> {route_id, repeat_count}, DELETE : 할당·해제 (토큰)
+- POST /api/assignments/<로봇>/start|resume : 시작(처음부터)·이어서 (토큰, 운영 모드·활성 지도만)
+- POST /api/assignments/<로봇>/pause|stop, POST /api/assignments/pause-all : 멈춤·정지 (토큰 불필요, 같은 출처만)
 
 쓰기 요청은 같은 출처(Origin = Host)만 허용합니다. rosbridge 자체에는 인증이 없으므로
 신뢰할 수 있는 네트워크에서만 사용하세요.
@@ -34,8 +44,12 @@ import threading
 import time
 import urllib.parse
 
+import sqlite3
+
+import dbutil
 import maps
 import patrol_store as store
+import places
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 FLEET_PATH = os.path.join(APP_DIR, 'config', 'fleet.json')
@@ -252,9 +266,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 q = self._query()
                 with DB_LOCK:
                     con = store.db()
-                    items = store.list_alerts(con, q.get('map') or None, q.get('status'), q.get('limit', 100), int(q.get('since', 0)))
+                    items = store.list_alerts(con, q.get('map') or None, q.get('status'), q.get('limit', 100), int(q.get('since', 0)),
+                                              q.get('robot') or None)
                     cnt = store.counts(con, q['map']) if q.get('map') else None
                 return self._json(200, {'alerts': items, 'counts': cnt})
+            if path == '/api/routes':
+                name = self._query().get('map', '')
+                with PLACES_LOCK:
+                    return self._json(200, {'map': name, 'routes': places.list_routes(PLACES_DB(), name)})
+            if path == '/api/assignments':
+                with PLACES_LOCK:
+                    items = places.list_assignments(PLACES_DB())
+                return self._json(200, {'assignments': items, 'runner': ROUTES.status(), 'mode': store.read_mode()['mode'],
+                                        'map': read_fleet().get('mapFile')})
+            m = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})/runs$', path)
+            if m:
+                with PLACES_LOCK:
+                    return self._json(200, {'robot': m.group(1), 'runs': places.list_runs(PLACES_DB(), m.group(1), int(self._query().get('limit', 10)))})
+            if path == '/api/places':
+                name = self._query().get('map', '')
+                with PLACES_LOCK:
+                    return self._json(200, {'map': name, 'places': places.list_places(PLACES_DB(), name)})
             m = re.match(r'^/api/alerts/(\d+)$', path)
             if m:
                 with DB_LOCK:
@@ -287,6 +319,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as e:
             return self._json(400, {'error': str(e)})
 
+        if path == '/api/places':
+            return self._places_write('create')
+        if path == '/api/routes':
+            return self._routes_write('create')
+        # 멈춤·정지(안전 쪽)는 토큰 없이, 시작·이어서(로봇이 스스로 움직임)는 토큰
+        if path == '/api/assignments/pause-all':
+            with PLACES_LOCK:
+                n = places.pause_all(PLACES_DB(), '비상정지')
+            return self._json(200, {'paused': n})
+        ma = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})/(start|resume|pause|stop)$', path)
+        if ma:
+            if ma.group(2) in ('start', 'resume') and not self._authorized():
+                return None
+            try:
+                return self._json(200, assignment_action(ma.group(1), ma.group(2)))
+            except KeyError:
+                return self._json(404, {'error': '할당된 경로가 없습니다'})
+            except ValueError as e:
+                return self._json(400, {'error': str(e)})
+
         m = re.match(r'^/api/(mapping/(start|stop|save)|mode|alerts/(\d+)/baseline)$', path)
         if not m:
             return self._json(404, {'error': 'not found'})
@@ -314,14 +366,89 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json(200, MAPPING.start(robots, bool(body.get('explore'))))
             if m.group(2) == 'stop':
                 return self._json(200, MAPPING.stop())
-            return self._json(200, MAPPING.save(str(body.get('name', ''))))
+            saved = MAPPING.save(str(body.get('name', '')))
+            with PLACES_LOCK:
+                places.ensure_map(PLACES_DB(), saved['name'])
+            return self._json(200, saved)
         except FileNotFoundError as e:
             return self._json(500, {'error': f'파일을 찾지 못했습니다 (ROS 환경에서 실행했는지, 지도가 있는지 확인): {e}'})
         except (ValueError, KeyError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
             return self._json(400, {'error': str(e)})
 
+    def _places_write(self, action, pid=None):
+        """지점 추가·고치기·지우기 (토큰 필요)"""
+        if not self._authorized():
+            return None
+        try:
+            body = self._body() if action != 'delete' else {}
+            with PLACES_LOCK:
+                con = PLACES_DB()
+                if action == 'create':
+                    maps.map_info(str(body.get('map', '')))    # 저장된 지도인지 확인
+                    return self._json(201, places.create_place(con, body))
+                if action == 'update':
+                    return self._json(200, places.update_place(con, pid, body))
+                return self._json(200, places.delete_place(con, pid))
+        except FileNotFoundError:
+            return self._json(404, {'error': '없는 지도입니다'})
+        except KeyError:
+            return self._json(404, {'error': '없는 지점입니다'})
+        except sqlite3.IntegrityError:
+            return self._json(400, {'error': '이 지도에 같은 이름의 지점이 있습니다'})
+        except (ValueError, json.JSONDecodeError) as e:
+            return self._json(400, {'error': str(e)})
+
+    def _routes_write(self, action, key=None):
+        """이동 경로(create/update/delete)·할당(assign/unassign) 쓰기 (토큰 필요)"""
+        if not self._authorized():
+            return None
+        try:
+            body = self._body() if action in ('create', 'update', 'assign') else {}
+            with PLACES_LOCK:
+                con = PLACES_DB()
+                if action == 'create':
+                    maps.map_info(str(body.get('map', '')))
+                    return self._json(201, places.create_route(con, body))
+                if action == 'update':
+                    return self._json(200, places.update_route(con, key, body))
+                if action == 'delete':
+                    return self._json(200, places.delete_route(con, key))
+                if action == 'assign':
+                    return self._json(200, places.set_assignment(con, key, body))
+                return self._json(200, places.delete_assignment(con, key))
+        except FileNotFoundError:
+            return self._json(404, {'error': '없는 지도입니다'})
+        except KeyError:
+            return self._json(404, {'error': '없는 경로 또는 할당입니다'})
+        except sqlite3.IntegrityError as e:
+            return self._json(400, {'error': f'저장할 수 없습니다: {e}'})
+        except (ValueError, json.JSONDecodeError) as e:
+            return self._json(400, {'error': str(e)})
+
+    def do_DELETE(self):
+        path = self.path.split('?')[0]
+        m = re.match(r'^/api/places/(\d+)$', path)
+        if m:
+            return self._places_write('delete', int(m.group(1)))
+        m = re.match(r'^/api/routes/(\d+)$', path)
+        if m:
+            return self._routes_write('delete', int(m.group(1)))
+        m = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})$', path)
+        if m:
+            return self._routes_write('unassign', m.group(1))
+        return self._json(404, {'error': 'not found'})
+
     def do_PUT(self):
         path = self.path.split('?')[0]
+        mpl = re.match(r'^/api/places/(\d+)$', path)
+        if mpl:
+            return self._places_write('update', int(mpl.group(1)))
+        mrt = re.match(r'^/api/routes/(\d+)$', path)
+        if mrt:
+            return self._routes_write('update', int(mrt.group(1)))
+        mas = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})$', path)
+        if mas:
+            return self._routes_write('assign', mas.group(1))
         m = re.match(r'^/api/zones/([^/]+)$', path)
         mp = re.match(r'^/api/patrol/([^/]+)$', path)
         if path != '/api/fleet' and not m and not mp:
@@ -338,6 +465,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json(200, store.write_patrol(mp.group(1), self._body(), ids))
             data = validate_fleet(self._body())
             write_fleet(data)
+            with PLACES_LOCK:   # robots 테이블도 맞춤 (빠진 로봇은 active = 0, 이력은 남김)
+                places.sync_robots(PLACES_DB(), data['robots'])
             return self._json(200, data)
         except FileNotFoundError:
             return self._json(404, {'error': '없는 지도입니다'})
@@ -347,7 +476,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 MAPPING = maps.Mapping()
 PATROL = maps.Patrol()
+ROUTES = maps.RouteRunner()
 DB_LOCK = threading.Lock()
+PLACES_LOCK = threading.Lock()
+_places_con = None
+
+
+def PLACES_DB():
+    """places.db 연결 하나를 PLACES_LOCK 과 함께 재사용. 파일이 없으면(처음·실행 중 지워짐) 새로 만들고
+    로봇·지도 목록을 다시 채움 (할당·지점의 외래 키 대상)."""
+    global _places_con
+    _places_con, fresh = dbutil.ensure(_places_con, places.DB_PATH, places.MIGRATIONS)
+    if fresh:
+        places.sync_robots(_places_con, read_fleet().get('robots', []))
+        places.sync_maps(_places_con, [m['name'] for m in maps.list_maps()])
+    return _places_con
 MODE_LOCK = threading.RLock()
 WATCHDOG = {'restarts': 0, 'last': None}
 
@@ -356,6 +499,44 @@ def mode_status():
     m = store.read_mode()
     return {**m, 'mapping': MAPPING.status(), 'patrol': {**PATROL.status(), 'restarts': WATCHDOG['restarts'], 'lastRestart': WATCHDOG['last']},
             'map': read_fleet().get('mapFile')}
+
+
+def assignment_action(robot_id, action):
+    """경로 시작·이어서·멈춤·정지. 시작·이어서는 운영 모드에서만, 실행기가 없으면 띄움."""
+    with MODE_LOCK:
+        if action in ('start', 'resume'):
+            mode = store.read_mode()['mode']
+            if mode != 'operate':
+                raise ValueError(f'운영 모드에서만 경로를 시작할 수 있습니다 (지금: {mode})')
+        with PLACES_LOCK:
+            a = places.control_assignment(PLACES_DB(), robot_id, action, read_fleet().get('mapFile'))
+        if action in ('start', 'resume') and not ROUTES.running():
+            try:
+                ROUTES.start(FLEET_PATH, places.DB_PATH)
+            except Exception as e:  # noqa: BLE001
+                with PLACES_LOCK:
+                    places.pause_all(PLACES_DB(), f'실행기를 시작하지 못함: {e}')
+                raise ValueError(f'경로 실행기를 시작하지 못했습니다 (ROS 환경에서 실행했는지 확인): {e}') from e
+    return {'assignment': a, 'runner': ROUTES.status()}
+
+
+def route_watchdog():
+    """실행 중인 경로가 있는데 실행기가 죽어 있으면 다시 띄움 (운영 모드에서만). 연달아 죽으면 간격을 늘림."""
+    wait = 5
+    while True:
+        time.sleep(wait)
+        try:
+            with MODE_LOCK:
+                with PLACES_LOCK:
+                    busy = places.any_running(PLACES_DB())
+                if not busy or ROUTES.running() or store.read_mode()['mode'] != 'operate':
+                    wait = 5
+                    continue
+                print(f'경로 실행기가 멈춰 있어 다시 시작합니다 (exit={ROUTES.status().get("exited")})', flush=True)
+                ROUTES.start(FLEET_PATH, places.DB_PATH)
+                wait = min(60, wait * 2)
+        except Exception as e:  # noqa: BLE001
+            print(f'경로 실행기 감시 오류: {e}', flush=True)
 
 
 def patrol_watchdog():
@@ -387,6 +568,10 @@ def set_mode(mode):
 
 
 def _set_mode(mode):
+    if mode != 'operate':   # 경비·지도 만들기는 로봇을 따로 움직이므로 이동 경로는 멈춤 (나중에 이어서 가능)
+        with PLACES_LOCK:
+            places.pause_all(PLACES_DB(), '모드 변경으로 멈춤')
+        ROUTES.stop()
     if mode == 'patrol':
         map_name = read_fleet().get('mapFile')
         if not map_name:
@@ -409,6 +594,17 @@ def main():
     ap.add_argument('--dir', default=os.path.join(APP_DIR, 'web'))
     a = ap.parse_args()
     admin_token()  # 없으면 생성
+    # DB 파일이 없으면 여기서 만듦 (data/places.db, data/alerts.db). 있으면 스키마 버전을 확인해 필요하면 올림
+    with PLACES_LOCK:
+        con = PLACES_DB()
+        places.sync_robots(con, read_fleet().get('robots', []))
+        places.sync_maps(con, [m['name'] for m in maps.list_maps()])
+        # 서버를 다시 켜도 로봇이 혼자 경로를 이어 가지 않게: 실행 중이던 경로는 멈춤
+        n = places.pause_all(con, '서버 재시작으로 멈춤 (경로 화면에서 이어서)')
+    store.db().close()    # alerts.db 도 시작할 때 만들거나 버전을 올림 (경비 노드보다 먼저)
+    print(f'DB: {places.DB_PATH} (버전 {dbutil.version(con)}), {store.DB_PATH}', flush=True)
+    if n:
+        print(f'실행 중이던 이동 경로 {n}개를 멈춤 상태로 바꿨습니다', flush=True)
     if store.read_mode()['mode'] == 'patrol':   # 다시 켰을 때 경비 모드였으면 이어서
         try:
             set_mode('patrol')
@@ -418,6 +614,7 @@ def main():
     elif store.read_mode()['mode'] == 'mapping':
         store.write_mode('operate')   # 지도 만들기는 이어서 하지 않음
     threading.Thread(target=patrol_watchdog, daemon=True).start()
+    threading.Thread(target=route_watchdog, daemon=True).start()
     handler = functools.partial(Handler, directory=a.dir)
     with http.server.ThreadingHTTPServer((a.bind, a.port), handler) as srv:
         print(f'TB3 web: http://{a.bind}:{a.port}/ ({a.dir}), fleet: {FLEET_PATH}', flush=True)
@@ -425,8 +622,9 @@ def main():
         try:
             srv.serve_forever()
         finally:
-            MAPPING.stop()   # 서버를 끄면 지도 만들기·경비 프로세스도 정지
+            MAPPING.stop()   # 서버를 끄면 지도 만들기·경비·경로 실행 프로세스도 정지
             PATROL.stop()
+            ROUTES.stop()
 
 
 if __name__ == '__main__':

@@ -41,6 +41,7 @@ from tf2_ros import Buffer, TransformListener
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
+import dbutil  # noqa: E402
 import maps  # noqa: E402
 import patrol_store as store  # noqa: E402
 
@@ -282,7 +283,8 @@ class PatrolNode(Node):
         self.map_name = self.get_parameter('map_name').value
         with open(self.get_parameter('fleet').value, encoding='utf-8') as f:
             self.fleet = json.load(f)
-        self.con = store.db(self.get_parameter('db').value)
+        self.db_path = self.get_parameter('db').value
+        self.con = store.db(self.db_path)
         self.db_lock = threading.Lock()
         self.load_config()
         self.base = Baseline(self.map_name, self.settings['tol'])
@@ -302,6 +304,10 @@ class PatrolNode(Node):
         self.cfg_mtime = os.path.getmtime(p) if os.path.exists(p) else 0
 
     def reload(self):
+        with self.db_lock:   # 실행 중 alerts.db 가 지워졌으면 새 파일로 (지워진 파일에 경보를 쓰지 않게)
+            self.con, fresh = dbutil.ensure(self.con, self.db_path, store.MIGRATIONS)
+        if fresh:
+            self.get_logger().warn('alerts.db 가 새로 만들어졌습니다')
         p = os.path.join(store.PATROL_DIR, f'{self.map_name}.json')
         if os.path.exists(p) and os.path.getmtime(p) != self.cfg_mtime:
             old = json.dumps(self.routes, sort_keys=True)
@@ -387,7 +393,7 @@ class PatrolNode(Node):
             if now - self.last_report.get(key, 0) < 3.0:
                 return
             self.last_report[key] = now
-            robots = sorted(set(json.loads(a['robots'] or '[]')) | {robot.id})
+            robots = sorted(set(store.alert_robot_ids(self.con, a['id'])) | {robot.id})
             # 다른 쪽 면이 보이면 상자를 합쳐 키움 (물체 하나로 볼 만한 2 m 까지)
             x0, x1 = min(a['x'] - a['w'] / 2, cx - w / 2), max(a['x'] + a['w'] / 2, cx + w / 2)
             y0, y1 = min(a['y'] - a['h'] / 2, cy - h / 2), max(a['y'] + a['h'] / 2, cy + h / 2)
@@ -398,18 +404,20 @@ class PatrolNode(Node):
             area = max(area, a['area'], max(uw, 0.1) * max(uh, 0.1))
             sev = self.severity(kind, area, robots)
             with self.con:
-                self.con.execute('UPDATE alerts SET last_seen=?, seen=seen+1, robots=?, area=?, severity=?, x=?, y=?, w=?, h=? WHERE id=?',
-                                 (now, json.dumps(robots), area, sev, ux, uy, uw, uh, a['id']))
+                self.con.execute('UPDATE alerts SET last_seen=?, seen=seen+1, area=?, severity=?, x=?, y=?, w=?, h=? WHERE id=?',
+                                 (now, area, sev, ux, uy, uw, uh, a['id']))
+                store.record_sighting(self.con, a['id'], robot.id, now)
             self.publish('update', a['id'])
             return
         near = [[x, y] for x, y in pts if (x - cx) ** 2 + (y - cy) ** 2 < 2.25][:400]
         sev = self.severity(kind, area, [robot.id])
         with self.con:
             cur = self.con.execute(
-                'INSERT INTO alerts (map, kind, x, y, w, h, area, first_seen, last_seen, robots, seen, severity, status, scan) '
-                "VALUES (?,?,?,?,?,?,?,?,?,?,1,?,'open',?)",
+                'INSERT INTO alerts (map, kind, x, y, w, h, area, first_seen, last_seen, seen, severity, status, scan) '
+                "VALUES (?,?,?,?,?,?,?,?,?,1,?,'open',?)",
                 (self.map_name, kind, round(cx, 3), round(cy, 3), round(w, 3), round(h, 3), round(area, 4), now, now,
-                 json.dumps([robot.id]), sev, json.dumps(near)))
+                 sev, json.dumps(near)))
+            store.record_sighting(self.con, cur.lastrowid, robot.id, now)
         self.get_logger().warn(f'경보 #{cur.lastrowid}: {kind} ({cx:.2f}, {cy:.2f}) {area:.2f} m² · {robot.name}')
         self.publish('new', cur.lastrowid)
 

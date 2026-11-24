@@ -279,6 +279,33 @@
         }
       }
 
+      // 이름 붙인 지점: [{x, y, yaw, name, selected, dim}] — 핀 + 방향 + 이름
+      if (st.places && st.places.length && this.layers.places !== false) {
+        ctx.font = '600 12px Inter, "Noto Sans KR", sans-serif';
+        for (const p of st.places) {
+          const [sx, sy] = this.toScreen(p.x, p.y);
+          if (sx < -60 || sy < -60 || sx > W + 60 || sy > H + 60) continue;
+          const col = p.selected ? '#FBBF24' : '#C084FC';
+          const rad = p.selected ? 8 : 6;
+          ctx.globalAlpha = p.dim ? 0.4 : 1;
+          const [hx, hy] = this.toScreen(p.x + Math.cos(p.yaw || 0) * 0.3, p.y + Math.sin(p.yaw || 0) * 0.3);
+          ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(hx, hy);
+          ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+          ctx.beginPath(); ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+          ctx.fillStyle = '#0E1116'; ctx.fill();
+          ctx.lineWidth = p.selected ? 3 : 2; ctx.stroke();
+          ctx.beginPath(); ctx.arc(sx, sy, 2.5, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+          if (p.name) {
+            const tw = ctx.measureText(p.name).width;
+            ctx.fillStyle = 'rgba(11,14,19,0.75)';
+            ctx.fillRect(sx + rad + 3, sy - rad - 15, tw + 8, 17);
+            ctx.fillStyle = col;
+            ctx.fillText(p.name, sx + rad + 7, sy - rad - 2);
+          }
+          ctx.globalAlpha = 1;
+        }
+      }
+
       // LiDAR
       if (this.layers.scan && st.scan.length) {
         ctx.fillStyle = COLORS.scan;

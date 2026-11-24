@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ros_prefix="$project_root/.robostack/jazzy"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-30}"
+# export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-99}"
+export ROS_LOG_DIR="${ROS_LOG_DIR:-$project_root/logs/ros}"
+mkdir -p "$ROS_LOG_DIR"
+
+if [[ ! -x "$ros_prefix/bin/ros2" ]]; then
+  printf 'RoboStack Jazzy is not installed at %s\n' "$ros_prefix" >&2
+  exit 1
+fi
+
+if [[ -n "${CONDA_EXE:-}" && -x "$CONDA_EXE" ]]; then
+  conda_exe="$CONDA_EXE"
+elif command -v conda >/dev/null 2>&1; then
+  conda_exe="$(command -v conda)"
+elif [[ -x /home/kernel/anaconda3/bin/conda ]]; then
+  conda_exe=/home/kernel/anaconda3/bin/conda
+else
+  printf 'Conda executable not found. Install Conda or set CONDA_EXE.\n' >&2
+  exit 1
+fi
+
+exec "$conda_exe" run --no-capture-output --prefix "$ros_prefix" ros2 "$@"

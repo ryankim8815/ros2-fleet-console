@@ -105,6 +105,35 @@ window.App.ready.then((App) => {
   }
   setInterval(updateZones, 1000);
 
+  // ---- 이름 붙인 지점 (활성 지도, data/places.db) → 지도 표시 + "지점으로 보내기" ----
+  let places = [];
+  const placeSel = $('#place-goal');
+  async function loadPlaces() {
+    if (!App.fleet.mapFile) { places = []; }
+    else {
+      try {
+        const r = await fetch(`/api/places?map=${encodeURIComponent(App.fleet.mapFile)}`, { cache: 'no-store' });
+        if (r.ok) places = (await r.json()).places;
+      } catch (e) { /* 지점 없이 동작 */ }
+    }
+    view.state.places = places.map((p) => ({ x: p.x, y: p.y, yaw: p.yaw, name: p.name }));
+    const keep = placeSel.value;
+    placeSel.innerHTML = `<option value="">${places.length ? '지점으로 보내기…' : '지점 없음 (지점 화면에서 추가)'}</option>`
+      + places.map((p) => `<option value="${p.id}">${esc(p.name)} (${p.x.toFixed(1)}, ${p.y.toFixed(1)})</option>`).join('');
+    placeSel.value = places.some((p) => String(p.id) === keep) ? keep : '';
+    view.invalidate();
+  }
+  placeSel.addEventListener('change', () => {
+    const p = places.find((x) => String(x.id) === placeSel.value);
+    placeSel.value = '';
+    if (!p) return;
+    setGoalMode(null);
+    event(sel, 'INFO', `지점 "${p.name}" 으로 보냄`);
+    sendGoal(sel, p.x, p.y, p.yaw);
+  });
+  loadPlaces();
+  setInterval(loadPlaces, 10000);   // 다른 화면에서 고친 지점 반영
+
   // ---- 지도가 없을 때 (처음 시작) 안내 ----
   (async () => {
     let maps = [];

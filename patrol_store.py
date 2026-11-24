@@ -4,14 +4,19 @@ serve.py 와 robot/patrol_node.py 가 함께 씁니다.
 
   config/mode.json             {"mode": "operate"|"mapping"|"patrol", "since": epoch, "by": ...}
   config/patrol/<지도>.json    {"routes": {robot_id: {"points": [[x,y],...], "enabled": true}}, "settings": {...}}
-  data/alerts.db               경보 (아래 SCHEMA)
+  data/alerts.db               경보 (스키마 버전 2, PRAGMA user_version)
+    alerts         경보 한 건 (위치·크기·등급·처리 상태·발견 당시 스캔)
+    alert_robots   그 경보를 본 로봇마다 한 줄 (처음·마지막 본 시각, 횟수) → 로봇별 검색
+  로봇 id 는 data/places.db 의 robots 와 같은 값이지만 다른 파일이라 외래 키는 걸 수 없습니다
+  (경보는 자주, 지점은 가끔 써서 파일을 나눠 잠금 충돌을 줄임).
 """
 import json
 import os
 import re
-import sqlite3
 import tempfile
 import time
+
+import dbutil
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(APP_DIR, 'config')
@@ -32,7 +37,7 @@ DEFAULT_SETTINGS = {
     'escalate': True,      # 다른 로봇이 같은 곳을 다시 보면 등급 올리기
 }
 
-SCHEMA = '''
+SCHEMA_V1 = '''
 CREATE TABLE IF NOT EXISTS alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   map TEXT NOT NULL,
@@ -50,6 +55,43 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS alerts_status ON alerts(map, status);
 '''
+
+
+def _v1(con):
+    """버전 1: 버전 관리 전의 구조 (alerts.robots 는 JSON 배열)"""
+    dbutil.script(con, SCHEMA_V1)
+
+
+def _v2(con):
+    """버전 2: 본 로봇을 alert_robots 로 분리 (로봇별 검색), 목록 정렬용 인덱스, 상태 값 CHECK"""
+    dbutil.script(con, '''
+CREATE TABLE alert_robots (
+  alert_id INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+  robot_id TEXT NOT NULL,          -- data/places.db robots.id (다른 파일이라 외래 키 없음)
+  first_seen REAL NOT NULL,
+  last_seen REAL NOT NULL,
+  seen INTEGER NOT NULL DEFAULT 1 CHECK (seen >= 1),
+  PRIMARY KEY (alert_id, robot_id)
+);
+INSERT INTO alert_robots (alert_id, robot_id, first_seen, last_seen, seen)
+  SELECT a.id, j.value, COALESCE(a.first_seen, a.last_seen, 0), COALESCE(a.last_seen, a.first_seen, 0), 1
+  FROM alerts a, json_each(COALESCE(a.robots, '[]')) j
+  WHERE j.type = 'text';
+CREATE INDEX alert_robots_robot ON alert_robots(robot_id, last_seen);
+CREATE INDEX alerts_recent ON alerts(map, last_seen);
+CREATE TRIGGER alerts_check_insert BEFORE INSERT ON alerts
+  WHEN NEW.kind NOT IN ('new', 'missing') OR NEW.status NOT IN ('open', 'ok', 'false', 'baseline')
+    OR NEW.severity NOT IN ('high', 'medium', 'low')
+  BEGIN SELECT RAISE(ABORT, 'alerts: kind/status/severity 값이 올바르지 않습니다'); END;
+CREATE TRIGGER alerts_check_update BEFORE UPDATE OF kind, status, severity ON alerts
+  WHEN NEW.kind NOT IN ('new', 'missing') OR NEW.status NOT IN ('open', 'ok', 'false', 'baseline')
+    OR NEW.severity NOT IN ('high', 'medium', 'low')
+  BEGIN SELECT RAISE(ABORT, 'alerts: kind/status/severity 값이 올바르지 않습니다'); END;
+ALTER TABLE alerts DROP COLUMN robots;
+''')
+
+
+MIGRATIONS = [_v1, _v2]
 
 
 def _atomic_json(path, obj):
@@ -128,17 +170,23 @@ def write_patrol(map_name, data, robot_ids):
 
 # ------------------------------------------------------------------ 경보 DB
 def db(path=DB_PATH):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    con = sqlite3.connect(path, timeout=5, check_same_thread=False)   # 노드·서버의 여러 스레드에서 (잠금은 호출하는 쪽)
-    con.row_factory = sqlite3.Row
-    con.execute('PRAGMA journal_mode=WAL')
-    con.executescript(SCHEMA)
-    return con
+    return dbutil.connect(path, MIGRATIONS)   # 노드·서버의 여러 스레드에서 (잠금은 호출하는 쪽)
 
 
-def _row(r, with_scan=False):
+def alert_robot_ids(con, aid):
+    return [r[0] for r in con.execute('SELECT robot_id FROM alert_robots WHERE alert_id = ? ORDER BY first_seen, robot_id', (aid,))]
+
+
+def record_sighting(con, aid, robot_id, now):
+    """그 로봇이 경보를 (다시) 봄. 트랜잭션 안에서 부름."""
+    con.execute('INSERT INTO alert_robots (alert_id, robot_id, first_seen, last_seen) VALUES (?,?,?,?) '
+                'ON CONFLICT(alert_id, robot_id) DO UPDATE SET last_seen = excluded.last_seen, seen = seen + 1',
+                (aid, robot_id, now, now))
+
+
+def _row(r, with_scan=False, con=None):
     d = dict(r)
-    d['robots'] = json.loads(d.get('robots') or '[]')
+    d['robots'] = alert_robot_ids(con, d['id']) if con is not None else []
     if with_scan:
         d['scan'] = json.loads(d.get('scan') or '[]')
     else:
@@ -146,21 +194,24 @@ def _row(r, with_scan=False):
     return d
 
 
-def list_alerts(con, map_name=None, status=None, limit=100, since_id=0):
+def list_alerts(con, map_name=None, status=None, limit=100, since_id=0, robot=None):
     q, args = 'SELECT * FROM alerts WHERE id > ?', [since_id]
     if map_name:
         q += ' AND map = ?'
         args.append(map_name)
+    if robot:
+        q += ' AND id IN (SELECT alert_id FROM alert_robots WHERE robot_id = ?)'
+        args.append(robot)
     if status == 'open':
         q += " AND status = 'open'"
     q += ' ORDER BY last_seen DESC LIMIT ?'
     args.append(min(int(limit), 500))
-    return [_row(r) for r in con.execute(q, args)]
+    return [_row(r, con=con) for r in con.execute(q, args).fetchall()]
 
 
 def get_alert(con, aid):
     r = con.execute('SELECT * FROM alerts WHERE id = ?', (aid,)).fetchone()
-    return _row(r, with_scan=True) if r else None
+    return _row(r, with_scan=True, con=con) if r else None
 
 
 def set_status(con, aid, status, note=''):

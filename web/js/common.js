@@ -190,9 +190,12 @@
     // 경비 중이면 순찰 goal 은 서버의 patrol_node 가 보낸 것이라 위에서 취소되지 않음 → 모든 로봇 순찰 멈춤
     // (경비가 아니면 받는 노드가 없어 아무 일도 없음)
     ros.publish('/fleet/patrol_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'pause', robot: '*' }) });
+    // 이동 경로도 서버의 실행기가 보낸 goal → 토픽으로 바로 취소하고, 서버 DB 에도 멈춤으로 기록 (실행기가 꺼져 있어도)
+    ros.publish('/fleet/route_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'pause', robot: '*' }) });
+    fetch('/api/assignments/pause-all', { method: 'POST' }).catch(() => {});
     const patrolling = document.querySelector('#mode-chip')?.dataset.mode === 'patrol';
     document.dispatchEvent(new CustomEvent('tb3:estop'));
-    toast(`비상정지: 로봇 ${robots.length}대에 정지 명령을 보내고 진행 중인 goal 을 취소했습니다${patrolling ? ' (순찰도 멈춤 — 경비 화면에서 재개)' : ''}`, 'danger');
+    toast(`비상정지: 로봇 ${robots.length}대에 정지 명령을 보내고 진행 중인 goal 을 취소했습니다${patrolling ? ' (순찰도 멈춤 — 경비 화면에서 재개)' : ''} · 이동 경로도 멈춤 (경로 화면에서 이어서)`, 'danger');
   }
 
   // ---------- 상단바 ----------

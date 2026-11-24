@@ -1,0 +1,9 @@
+[workspace]
+name = "ros2-fleet-console"
+version = "0.1.0"
+description = "TurtleBot3 and Pinky Pro fleet console"
+platforms = ["linux-64"]
+channels = ["https://prefix.dev/conda-forge"]
+
+[tasks]
+web = "./bin/ros2 launch launch/web.launch.py"

@@ -37,7 +37,14 @@ def generate_launch_description():
         PushRosNamespace(ns),
         SetRemap(src='/tf', dst='tf'),
         SetRemap(src='/tf_static', dst='tf_static'),
-        IncludeLaunchDescription(AnyLaunchDescriptionSource(bringup)),
+        # 안쪽 pinky_description/upload_robot.launch.py 도 'namespace' 인자를 선언하므로, 이 파일의
+        # namespace:=pinky_01 이 그대로 새어 들어가면 robot_state_publisher 가 /pinky_01/pinky_01 에 뜨고
+        # URDF 프레임에도 pinky_01/ 접두사가 붙습니다. include 안에서만 namespace 를 비워 막습니다
+        # (네임스페이스는 위의 PushRosNamespace 가 이미 씌움). include 인자는 범위가 없어 GroupAction 으로 감쌈.
+        GroupAction([
+            IncludeLaunchDescription(AnyLaunchDescriptionSource(bringup),
+                                     launch_arguments={'namespace': ''}.items()),
+        ]),
         Node(package='pinky_led', executable='led_server', output='screen',
              condition=IfCondition(LaunchConfiguration('led'))),
         Node(package='pinky_emotion', executable='emotion_server', output='screen',
