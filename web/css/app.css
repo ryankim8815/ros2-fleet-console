@@ -196,6 +196,9 @@ kbd { font-family: var(--mono); color: var(--text); background: var(--raised); b
 .sf-nav2 { font-size: 12px; }
 .alert-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; background: rgba(220, 38, 38, 0.16); border: 1px solid var(--danger); color: var(--danger-3); font-weight: 700; font-size: 13px; text-decoration: none; }
 .alert-chip:hover { color: #fff; }
+.alarm-chip { animation: alarm-pulse 1.2s ease-in-out infinite; }
+@keyframes alarm-pulse { 50% { background: rgba(220, 38, 38, 0.45); } }
+@media (prefers-reduced-motion: reduce) { .alarm-chip { animation: none; } }
 .mode-dialog { width: min(440px, calc(100vw - 32px)); background: var(--panel); color: var(--text); border: 1px solid var(--line-2); border-radius: 16px; padding: 20px; }
 .mode-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
 .mode-opt { display: flex; gap: 12px; padding: 12px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--bg); cursor: pointer; }

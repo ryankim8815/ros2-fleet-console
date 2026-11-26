@@ -76,12 +76,16 @@ window.App.ready.then(async (App) => {
     render();
   }
 
+  let workers = null;              // 워커 역할인 로봇 id (null = 아직 모름)
   async function loadAssigns() {
     try {
       const a = await (await fetch('/api/assignments', { cache: 'no-store' })).json();
       assigns = a.assignments || [];
       runner = a.runner || { running: false };
       mode = a.mode;
+      // 경로 시작·이어서는 워커 역할인 로봇만 (역할 화면)
+      const rr = (await (await fetch('/api/roles', { cache: 'no-store' })).json()).roles || [];
+      workers = new Set(rr.filter((x) => x.role === 'worker').map((x) => x.robot_id));
     } catch (e) { /* 다음에 다시 */ }
   }
 
@@ -286,6 +290,7 @@ window.App.ready.then(async (App) => {
       const opts = (otherMap ? `<option value="${a.route_id}">${esc(a.route_name)} (지도 ${esc(a.map)})</option>` : '')
         + routes.map((rt) => `<option value="${rt.id}" ${rt.id === rid ? 'selected' : ''}>${esc(rt.name)}</option>`).join('');
       const running = a && a.state === 'running';
+      const notWorker = workers && !workers.has(r.id);
       if (r.gone) {
         return `<div class="item" data-a="${esc(r.id)}" style="flex-wrap: wrap; gap: 8px; opacity: 0.8">
           <span class="swatch" style="background: ${esc(r.color)}"></span><b style="min-width: 90px">${esc(r.name)}</b>
@@ -305,11 +310,12 @@ window.App.ready.then(async (App) => {
           <input type="number" data-k="repeat" min="0" max="10000" step="1" value="${rep}" style="width: 80px" aria-label="${esc(r.name)} 반복 횟수 (0 = 계속)"></label>
         <button class="btn btn-sm ${unsaved ? 'btn-primary' : ''}" data-act="save" ${unsaved && rid !== '' ? '' : 'disabled'}>할당 저장</button>
         <span class="badge ${stCls}">${stText}</span>
+        ${notWorker ? '<a class="badge warn" href="roles.html" title="경로를 돌리려면 역할 화면에서 워커로 지정">워커 아님</a>' : ''}
         <div class="spacer"></div>
         ${a ? `
-          <button class="btn btn-sm" data-act="start" ${running || !active || otherMap ? 'disabled' : ''} title="처음(1바퀴째 첫 지점)부터">시작</button>
+          <button class="btn btn-sm" data-act="start" ${running || !active || otherMap || notWorker ? 'disabled' : ''} title="${notWorker ? '워커 역할인 로봇만 경로를 돕니다 (역할 화면)' : '처음(1바퀴째 첫 지점)부터'}">시작</button>
           <button class="btn btn-sm" data-act="pause" ${running ? '' : 'disabled'}>멈춤</button>
-          <button class="btn btn-sm" data-act="resume" ${['paused', 'failed', 'stopped'].includes(a.state) && a.run_id && active && !otherMap ? '' : 'disabled'} title="멈춘 바퀴·지점부터">이어서</button>
+          <button class="btn btn-sm" data-act="resume" ${['paused', 'failed', 'stopped'].includes(a.state) && a.run_id && active && !otherMap && !notWorker ? '' : 'disabled'} title="멈춘 바퀴·지점부터">이어서</button>
           <button class="btn btn-sm" data-act="stop" ${['running', 'paused', 'failed'].includes(a.state) ? '' : 'disabled'}>정지</button>
           <button class="btn btn-sm btn-danger-outline" data-act="unassign" ${running ? 'disabled' : ''}>해제</button>` : ''}
         <button class="btn btn-sm" data-act="history" aria-expanded="${r.id in history}">이력</button>

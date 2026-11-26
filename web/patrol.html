@@ -28,6 +28,7 @@
     </a>
     <nav aria-label="주 메뉴" class="topnav">
       <a class="btn btn-sm" href="fleet.html">플릿</a>
+      <a class="btn btn-sm" href="roles.html">역할</a>
       <a class="btn btn-sm" href="mapping.html">지도 만들기</a>
       <a class="btn btn-sm" href="patrol.html" aria-current="page">경비</a>
       <a class="btn btn-sm" href="zones.html">이동 구역</a>
@@ -38,13 +39,13 @@
     </nav>
     <button class="pill" data-conn="wait" title="클릭하여 rosbridge 주소 변경"><span class="dot"></span><span data-conn-text>연결 중…</span><span class="mono" data-latency></span></button>
     <div class="spacer"></div>
-    <button class="btn" id="patrol-toggle">경비 시작</button>
+    <a class="btn" href="roles.html" style="text-decoration: none" title="로봇마다 역할(워커·경비)을 정하고 경비를 시작·멈춤">역할 · 경비 시작</a>
     <button class="estop" data-estop title="단축키 Esc">전체 비상정지</button>
   </header>
 
   <div class="tabs" role="tablist" aria-label="경비 화면">
     <button role="tab" data-tab="watch" aria-selected="true">경비 현황</button>
-    <button role="tab" data-tab="routes" aria-selected="false">순찰 경로 · 감지 설정</button>
+    <button role="tab" data-tab="routes" aria-selected="false">순회 · 감지 설정</button>
     <div class="spacer"></div>
     <span class="muted" style="font-size: 12px; align-self: center" id="base-info"></span>
   </div>
@@ -64,14 +65,13 @@
       <label class="muted" style="font-size: 12px; display: flex; gap: 6px; align-items: center"><input type="checkbox" id="notif"> 브라우저 알림 받기</label>
       <div class="col" style="gap: 8px" id="alert-list"><div class="empty">불러오는 중…</div></div>
     </aside>
-    <aside class="col hidden" style="flex: 1 1 300px; max-width: 100%" id="left-routes" aria-label="순찰 경로 편집">
+    <aside class="col hidden" style="flex: 1 1 300px; max-width: 100%" id="left-routes" aria-label="순회·감지 설정">
       <section class="panel">
-        <h2>순찰 경로</h2>
-        <label class="field">로봇 <select id="route-robot"></select></label>
-        <label class="muted" style="font-size: 13px; display: flex; gap: 6px; align-items: center"><input type="checkbox" id="route-enabled" checked> 이 로봇 순찰</label>
-        <div class="muted" style="font-size: 12px">지도를 클릭해 지점을 추가합니다. 마지막 지점 다음에는 첫 지점으로 돌아가 반복합니다.</div>
-        <div class="col" style="gap: 4px" id="wp-list"></div>
-        <div style="display: flex; gap: 8px"><button class="btn btn-sm" id="wp-undo">마지막 지점 빼기</button><button class="btn btn-sm btn-danger-outline" id="wp-clear">모두 지우기</button></div>
+        <h2>자동 순회</h2>
+        <div class="muted" style="font-size: 12px; line-height: 1.6">경비 로봇은 기준 지도에서 갈 수 있는 곳(벽에서 몸체 반지름 + 12 cm 이상, 이동 구역 안)을 빠짐없이 도는 지점을 스스로 만들어 지그재그로 반복합니다. 경비 로봇이 여럿이면 구역을 나눠 맡습니다. 지도의 점선이 지금 경비 중인 로봇의 순회 지점입니다.</div>
+        <label class="field"><span class="line">순회 지점 간격 (작을수록 꼼꼼·오래 걸림) <b id="s-spacing"></b></span><input type="range" data-s="spacing" min="0.5" max="3" step="0.1"></label>
+        <label class="field"><span class="line">장애물 앞 대기 중 소리·LED 반복 간격 <b id="s-alarm_interval"></b></span><input type="range" data-s="alarm_interval" min="2" max="30" step="1"></label>
+        <div class="muted" style="font-size: 12px" id="plan-info"></div>
       </section>
       <section class="panel">
         <h2>감지 설정</h2>
@@ -82,24 +82,23 @@
         <label class="field"><span class="line">증거 유지 시간 (지나가는 것 무시) <b id="s-decay"></b></span><input type="range" data-s="decay" min="2" max="60" step="1"></label>
         <label class="muted" style="font-size: 13px; display: flex; gap: 6px; align-items: center"><input type="checkbox" data-s="escalate"> 다른 로봇이 같은 곳을 다시 보면 등급 올리기</label>
       </section>
-      <button class="btn btn-primary" id="routes-save" style="min-height: 44px" disabled>저장 (경비 중이면 바로 반영)</button>
+      <button class="btn btn-primary" id="routes-save" style="min-height: 44px" disabled>저장 (경비 중이면 5초 안에 반영)</button>
     </aside>
 
     <!-- 가운데: 지도 -->
     <section class="panel" style="flex: 3 1 520px; padding: 0; gap: 0">
       <div class="panel-head" style="padding: 12px 16px; border-bottom: 1px solid var(--line)">
-        <h2 id="map-title">순찰 지도</h2>
+        <h2 id="map-title">경비 지도</h2>
         <span class="muted" style="font-size: 12px">빨강 = 새로 생긴 것 · 노랑 점선 = 사라진 것</span>
         <div class="spacer"></div>
         <div class="seg" role="group" aria-label="레이어">
-          <button data-layer="routes" aria-pressed="true">순찰 경로</button>
+          <button data-layer="routes" aria-pressed="true">순회 지점</button>
           <button data-layer="zones" aria-pressed="true">경보</button>
           <button data-layer="scan" aria-pressed="false">LiDAR</button>
         </div>
       </div>
       <div class="view" id="view" style="height: 600px">
-        <canvas id="canvas" role="img" aria-label="기준 지도, 순찰 경로, 경보 위치, 로봇"></canvas>
-        <div class="hint hidden" id="route-hint">지도를 클릭해 순찰 지점 추가</div>
+        <canvas id="canvas" role="img" aria-label="기준 지도, 경비 순회 지점, 경보 위치, 로봇"></canvas>
         <div class="zoom"><button id="zoom-in" aria-label="확대">+</button><button id="zoom-out" aria-label="축소">−</button></div>
       </div>
     </section>
@@ -112,7 +111,7 @@
 
   <div class="row" style="padding: 0 20px 20px" id="bottom-watch">
     <section class="panel" style="flex: 1 1 600px">
-      <div class="panel-head"><h2>순찰 상태</h2><span class="muted" style="font-size: 12px" id="patrol-proc"></span></div>
+      <div class="panel-head"><h2>경비 로봇</h2><span class="muted" style="font-size: 12px" id="patrol-proc"></span><div class="spacer"></div><a class="btn btn-sm" href="roles.html" style="text-decoration: none">역할 화면</a></div>
       <div class="table-wrap">
         <table class="t">
           <thead><tr><th>로봇</th><th>상태</th><th>지점</th><th class="num">바퀴</th><th>위치 추정</th><th>배터리</th><th></th></tr></thead>

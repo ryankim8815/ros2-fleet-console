@@ -407,7 +407,7 @@ class Mapping(_Proc):
 
 
 class Patrol(_Proc):
-    """경비: patrol_node.py (순찰 경로 반복 + 기준 지도와 차이 감지 + 경보 DB)."""
+    """경비 노드: patrol_node.py (경비 역할 로봇의 자동 순회 + 기준 지도와 차이 감지 + 경보 DB + 장애물 대기 알림)."""
 
     def __init__(self):
         super().__init__('patrol.log')

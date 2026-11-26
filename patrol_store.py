@@ -1,9 +1,10 @@
-"""경비 모드 저장소: 운영 모드, 순찰 경로·감지 설정(지도별 JSON), 경보 기록(SQLite).
+"""경비 저장소: 운영 모드, 경비 감지·순회 설정(지도별 JSON), 경보 기록(SQLite).
 
-serve.py 와 robot/patrol_node.py 가 함께 씁니다.
+serve.py 와 robot/patrol_node.py(경비 노드)가 함께 씁니다.
 
-  config/mode.json             {"mode": "operate"|"mapping"|"patrol", "since": epoch, "by": ...}
-  config/patrol/<지도>.json    {"routes": {robot_id: {"points": [[x,y],...], "enabled": true}}, "settings": {...}}
+  config/mode.json             {"mode": "operate"|"mapping", "since": epoch}
+                               (예전 "patrol"(플릿 전체 경비) 은 없어짐 → 운영 모드에서 로봇마다 역할(roles.py)로)
+  config/patrol/<지도>.json    {"settings": {...}} (예전 파일의 "routes"(수동 순찰 경로)는 읽지 않음)
   data/fleet.db (fleet_db.py)  경보: alerts (한 건), alert_robots (본 로봇마다 한 줄, robots 외래 키 → 로봇별 검색)
 """
 import json
@@ -20,7 +21,7 @@ MODE_PATH = os.path.join(CONFIG, 'mode.json')
 PATROL_DIR = os.path.join(CONFIG, 'patrol')
 DB_PATH = fleet_db.DB_PATH
 
-MODES = ('operate', 'mapping', 'patrol')
+MODES = ('operate', 'mapping')
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$')
 ID_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]{0,40}$')
 
@@ -31,6 +32,8 @@ DEFAULT_SETTINGS = {
     'tol': 0.15,           # 기준 지도 벽에서 이 거리 안은 차이로 보지 않음 (위치 오차 여유, m)
     'decay': 10.0,         # 이 시간(초) 동안 다시 안 보이면 증거를 지움 (지나가는 사람 등)
     'escalate': True,      # 다른 로봇이 같은 곳을 다시 보면 등급 올리기
+    'spacing': 1.0,        # 경비 순회 지점 간격 (m): 갈 수 있는 곳을 이 간격 격자로 빠짐없이 돎 (작을수록 꼼꼼·느림)
+    'alarm_interval': 5.0, # 장애물 앞에서 기다리는 동안 소리·LED 를 반복하는 간격 (초)
 }
 
 MIGRATIONS = fleet_db.MIGRATIONS
@@ -53,6 +56,8 @@ def read_mode():
             m = json.load(f)
         if m.get('mode') in MODES:
             return m
+        if m.get('mode') == 'patrol':   # 예전 '경비 모드' → 운영 (경비는 이제 로봇 역할)
+            return {'mode': 'operate', 'since': m.get('since', 0)}
     except (FileNotFoundError, ValueError):
         pass
     return {'mode': 'operate', 'since': 0}
@@ -75,37 +80,24 @@ def read_patrol(map_name):
             d = json.load(f)
     except FileNotFoundError:
         d = {}
-    return {'map': map_name, 'routes': d.get('routes', {}), 'settings': {**DEFAULT_SETTINGS, **d.get('settings', {})}}
+    saved = {k: v for k, v in d.get('settings', {}).items() if k in DEFAULT_SETTINGS}
+    return {'map': map_name, 'settings': {**DEFAULT_SETTINGS, **saved}}
 
 
-def write_patrol(map_name, data, robot_ids):
+def write_patrol(map_name, data, robot_ids=None):
+    """감지·순회 설정 저장 (data: {"settings": {...}}). robot_ids 는 예전 호출과 맞추려고 받기만 함"""
     cur = read_patrol(map_name)
-    routes = data.get('routes', cur['routes'])
-    if not isinstance(routes, dict):
-        raise ValueError('routes 는 {로봇 id: {points, enabled}} 형식')
-    clean = {}
-    for rid, r in routes.items():
-        if rid not in robot_ids:
-            raise ValueError(f'등록되지 않은 로봇: {rid}')
-        pts = r.get('points', [])
-        if not isinstance(pts, list) or len(pts) > 100:
-            raise ValueError(f'{rid}: 지점은 100개 이하')
-        ok = []
-        for p in pts:
-            if not (isinstance(p, list) and len(p) == 2 and all(isinstance(v, (int, float)) for v in p)):
-                raise ValueError(f'{rid}: 지점 형식 오류')
-            ok.append([round(float(p[0]), 3), round(float(p[1]), 3)])
-        clean[rid] = {'points': ok, 'enabled': bool(r.get('enabled', True))}
     s = {**cur['settings']}
     for k, v in (data.get('settings') or {}).items():
         if k not in DEFAULT_SETTINGS:
             raise ValueError(f'알 수 없는 설정: {k}')
         s[k] = bool(v) if isinstance(DEFAULT_SETTINGS[k], bool) else float(v)
     if not (0.01 <= s['min_area'] <= 5 and 1 <= s['persist'] <= 20 and 0.5 <= s['max_range'] <= 12
-            and 0.02 <= s['tol'] <= 1 and 1 <= s['decay'] <= 600):
+            and 0.02 <= s['tol'] <= 1 and 1 <= s['decay'] <= 600 and 0.5 <= s['spacing'] <= 3
+            and 2 <= s['alarm_interval'] <= 60):
         raise ValueError('설정 값이 범위를 벗어났습니다')
     s['persist'] = int(s['persist'])
-    out = {'routes': clean, 'settings': s}
+    out = {'settings': s}
     _atomic_json(os.path.join(PATROL_DIR, f'{map_name}.json'), out)
     return {'map': map_name, **out}
 

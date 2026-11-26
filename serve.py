@@ -11,8 +11,12 @@
 - PUT  /api/zones/<name>      : 구역 저장 + 로봇별 keepout 마스크 생성 (토큰)
 - GET  /api/mapping           : 지도 만들기 상태
 - POST /api/mapping/start|stop|save : 여러 로봇 slam_toolbox + 지도 합치기 실행·정지, 저장 (토큰)
-- GET  /api/mode, POST /api/mode    : 운영 모드 (operate | mapping | patrol, 바꾸기는 토큰)
-- GET/PUT /api/patrol/<지도>        : 순찰 경로·감지 설정 (저장은 토큰)
+- GET  /api/mode, POST /api/mode    : 운영 모드 (operate | mapping, 바꾸기는 토큰). 운영 모드에서 로봇마다 역할대로 움직임
+- GET  /api/roles                   : 로봇별 역할(워커·경비)·경비 상태 + 경비 노드 상태
+- PUT  /api/roles/<로봇> {role: worker|guard|null} : 역할 지정 (토큰). 워커를 그만두면 경로 멈춤, 경비를 그만두면 경비 정지
+- POST /api/roles/<로봇>/guard/start|resume : 경비 시작·재개 (토큰, 운영 모드·활성 지도, 경비 노드를 띄움)
+- POST /api/roles/<로봇>/guard/pause|stop   : 경비 멈춤·정지 (토큰 불필요, 같은 출처만)
+- GET/PUT /api/patrol/<지도>        : 경비 감지·순회 설정 (저장은 토큰)
 - GET  /api/alerts?map=&status=open&robot= : 경보 목록 (robot: 그 로봇이 본 경보만), GET /api/alerts/<id> : 상세(주변 스캔 포함)
 - POST /api/alerts/<id> {status}    : 이상 없음(ok) / 오탐(false) / 다시 열기(open)
 - POST /api/alerts/<id>/baseline    : 기준 지도에 반영 (토큰)
@@ -24,8 +28,9 @@
 - GET  /api/assignments             : 로봇별 경로 할당·지금 실행의 진행 + 실행기 상태
 - GET  /api/assignments/<로봇>/runs : 그 로봇의 최근 실행과 이력 (시작·멈춤·바퀴 완료·실패 …)
 - PUT  /api/assignments/<로봇> {route_id, repeat_count}, DELETE : 할당·해제 (토큰)
-- POST /api/assignments/<로봇>/start|resume : 시작(처음부터)·이어서 (토큰, 운영 모드·활성 지도만)
-- POST /api/assignments/<로봇>/pause|stop, POST /api/assignments/pause-all : 멈춤·정지 (토큰 불필요, 같은 출처만)
+- POST /api/assignments/<로봇>/start|resume : 시작(처음부터)·이어서 (토큰, 운영 모드·활성 지도·워커 역할만)
+- POST /api/assignments/<로봇>/pause|stop : 멈춤·정지 (토큰 불필요, 같은 출처만)
+- POST /api/assignments/pause-all   : 전체 비상정지 — 모든 이동 경로와 경비를 멈춤 (토큰 불필요, 같은 출처만)
 - GET  /api/safety : LiDAR 안전 구역 (safety.py, DB) 플릿 기본값 + 로봇별 적용 값(robots) + 최근 변경 이력(changes)
 - PUT  /api/safety {enabled, stop_dist, slow_dist, slow_speed, by} : 플릿 기본값
 - PUT  /api/safety/robots/<로봇> {...}, DELETE /api/safety/robots/<로봇>?by= : 로봇별 덮어쓰기 저장·지우기(기본값으로)
@@ -56,6 +61,7 @@ import fleet_db
 import maps
 import patrol_store as store
 import places
+import roles
 import safety
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -266,6 +272,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json(200, MAPPING.status())
             if path == '/api/mode':
                 return self._json(200, mode_status())
+            if path == '/api/roles':
+                with DB_LOCK:
+                    items = roles.list_roles(DB())
+                return self._json(200, {'roles': items, 'guard': PATROL.status(), 'mode': store.read_mode()['mode'],
+                                        'map': read_fleet().get('mapFile')})
             if path == '/api/safety':
                 with DB_LOCK:
                     con = DB()
@@ -335,10 +346,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == '/api/routes':
             return self._routes_write('create')
         # 멈춤·정지(안전 쪽)는 토큰 없이, 시작·이어서(로봇이 스스로 움직임)는 토큰
-        if path == '/api/assignments/pause-all':
+        if path == '/api/assignments/pause-all':   # 전체 비상정지: 이동 경로와 경비 모두
             with DB_LOCK:
                 n = places.pause_all(DB(), '비상정지')
-            return self._json(200, {'paused': n})
+                g = roles.pause_all_guards(DB(), '비상정지 (역할 화면에서 재개)')
+            return self._json(200, {'paused': n, 'guardsPaused': g})
+        mg = re.match(r'^/api/roles/([A-Za-z][A-Za-z0-9_]{0,40})/guard/(start|resume|pause|stop)$', path)
+        if mg:
+            if mg.group(2) in ('start', 'resume') and not self._authorized():
+                return None
+            try:
+                return self._json(200, guard_action(mg.group(1), mg.group(2)))
+            except KeyError:
+                return self._json(404, {'error': '등록되지 않은 로봇입니다'})
+            except ValueError as e:
+                return self._json(400, {'error': str(e)})
         ma = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})/(start|resume|pause|stop)$', path)
         if ma:
             if ma.group(2) in ('start', 'resume') and not self._authorized():
@@ -495,6 +517,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._routes_write('assign', mas.group(1))
         if path == '/api/safety':
             return self._safety_write()
+        mrl = re.match(r'^/api/roles/([A-Za-z][A-Za-z0-9_]{0,40})$', path)
+        if mrl:
+            if not self._authorized():
+                return None
+            try:
+                role = self._body().get('role')
+                return self._json(200, set_robot_role(mrl.group(1), role))
+            except KeyError:
+                return self._json(404, {'error': '등록되지 않은 로봇입니다'})
+            except (ValueError, json.JSONDecodeError) as e:
+                return self._json(400, {'error': str(e)})
         msr = re.match(r'^/api/safety/robots/([A-Za-z][A-Za-z0-9_]{0,40})$', path)
         if msr:
             return self._safety_write(msr.group(1))
@@ -545,7 +578,12 @@ WATCHDOG = {'restarts': 0, 'last': None}
 
 def mode_status():
     m = store.read_mode()
-    return {**m, 'mapping': MAPPING.status(), 'patrol': {**PATROL.status(), 'restarts': WATCHDOG['restarts'], 'lastRestart': WATCHDOG['last']},
+    with DB_LOCK:
+        guards = [r for r in roles.list_roles(DB()) if r['role'] == 'guard']
+    return {**m, 'mapping': MAPPING.status(),
+            'guard': {**PATROL.status(), 'restarts': WATCHDOG['restarts'], 'lastRestart': WATCHDOG['last'],
+                      'active': sum(r['guard_state'] in ('running', 'alarm') for r in guards),
+                      'alarm': sum(r['guard_state'] == 'alarm' for r in guards)},
             'map': read_fleet().get('mapFile')}
 
 
@@ -556,6 +594,10 @@ def assignment_action(robot_id, action):
             mode = store.read_mode()['mode']
             if mode != 'operate':
                 raise ValueError(f'운영 모드에서만 경로를 시작할 수 있습니다 (지금: {mode})')
+            with DB_LOCK:
+                role = roles.role_of(DB(), robot_id)
+            if role != 'worker':
+                raise ValueError(f'워커 역할인 로봇만 이동 경로를 돌 수 있습니다 (지금: {roles.ROLE_LABEL[role]}). 역할 화면에서 워커로 지정하세요')
         with DB_LOCK:
             a = places.control_assignment(DB(), robot_id, action, read_fleet().get('mapFile'))
         if action in ('start', 'resume') and not ROUTES.running():
@@ -587,19 +629,26 @@ def route_watchdog():
             print(f'경로 실행기 감시 오류: {e}', flush=True)
 
 
-def patrol_watchdog():
-    """경비 모드인데 patrol_node 가 죽어 있으면 다시 띄움 (죽은 채로 두면 경보가 조용히 멈춤). 연달아 죽으면 간격을 늘림."""
+def guard_watchdog():
+    """운영 모드에서 경비 중(running·alarm)인 로봇이 있는데 경비 노드가 죽어 있으면 다시 띄움
+    (죽은 채로 두면 감지·알림이 조용히 멈춤). 경비 중인 로봇이 없으면 노드를 끔. 연달아 죽으면 간격을 늘림."""
     wait = 5
     while True:
         time.sleep(wait)
         try:
             with MODE_LOCK:
-                if store.read_mode()['mode'] != 'patrol' or PATROL.running():
+                with DB_LOCK:
+                    busy = roles.any_guard_active(DB())
+                if not busy or store.read_mode()['mode'] != 'operate':
+                    if PATROL.running():
+                        PATROL.stop()
                     wait = 5
                     continue
-                st = PATROL.status()
-                print(f'경비 프로세스가 멈춰 있어 다시 시작합니다 (exit={st.get("exited")})', flush=True)
-                PATROL.start(read_fleet().get('mapFile'), FLEET_PATH, fleet_db.DB_PATH)
+                if PATROL.running():
+                    wait = 5
+                    continue
+                print(f'경비 노드가 멈춰 있어 다시 시작합니다 (exit={PATROL.status().get("exited")})', flush=True)
+                start_guard_node()
                 WATCHDOG['restarts'] += 1
                 WATCHDOG['last'] = time.time()
                 wait = min(60, wait * 2)
@@ -607,30 +656,66 @@ def patrol_watchdog():
             print(f'경비 감시 오류: {e}', flush=True)
 
 
+def start_guard_node():
+    map_name = read_fleet().get('mapFile')
+    if not map_name:
+        raise ValueError('활성 지도가 없습니다. 먼저 지도를 만들고 활성 지도로 지정하세요')
+    if not PATROL.running():
+        PATROL.start(map_name, FLEET_PATH, fleet_db.DB_PATH)
+
+
+def guard_action(robot_id, action):
+    """경비 시작·재개(운영 모드·활성 지도, 노드를 띄움)·멈춤·정지"""
+    with MODE_LOCK:
+        if action in ('start', 'resume'):
+            mode = store.read_mode()['mode']
+            if mode != 'operate':
+                raise ValueError(f'운영 모드에서만 경비를 시작할 수 있습니다 (지금: {mode})')
+            if not read_fleet().get('mapFile'):
+                raise ValueError('활성 지도가 없습니다. 먼저 지도를 만들고 활성 지도로 지정하세요')
+        with DB_LOCK:
+            r = roles.guard_control(DB(), robot_id, action)   # 경비 역할이 아니면 ValueError
+        if action in ('start', 'resume'):
+            try:
+                start_guard_node()
+            except Exception as e:  # noqa: BLE001
+                with DB_LOCK:
+                    roles.guard_control(DB(), robot_id, 'pause', f'경비 노드를 시작하지 못함: {e}')
+                raise ValueError(f'경비 노드를 시작하지 못했습니다 (ROS 환경에서 실행했는지 확인): {e}') from e
+    return {'role': r, 'guard': PATROL.status()}
+
+
+def set_robot_role(robot_id, role):
+    """역할 지정. 워커를 그만두면 실행 중인 이동 경로를 멈춤 (경비를 그만두면 roles.set_role 이 경비 상태를 stopped 로)"""
+    with MODE_LOCK:
+        with DB_LOCK:
+            con = DB()
+            row, prev = roles.set_role(con, robot_id, role)
+            if prev == 'worker' and role != 'worker':
+                a = places.get_assignment(con, robot_id)
+                if a and a.get('state') == 'running':
+                    places.control_assignment(con, robot_id, 'pause')
+            return {'robot_id': robot_id, 'role': row['role'] if row else None, 'previous': prev,
+                    'guard_state': row['guard_state'] if row else 'stopped'}
+
+
 def set_mode(mode):
-    """운영 모드 바꾸기. 경비 = patrol_node 시작, 다른 모드로 가면 경비·지도 만들기 프로세스 정지."""
+    """운영 모드 바꾸기 (operate | mapping). 지도 만들기로 가면 이동 경로·경비를 멈추고 경비 노드를 끔."""
     if mode not in store.MODES:
-        raise ValueError('모드는 operate | mapping | patrol')
+        raise ValueError('모드는 operate | mapping')
     with MODE_LOCK:
         return _set_mode(mode)
 
 
 def _set_mode(mode):
-    if mode != 'operate':   # 경비·지도 만들기는 로봇을 따로 움직이므로 이동 경로는 멈춤 (나중에 이어서 가능)
+    if mode == 'mapping':   # 지도 만들기는 로봇을 따로 움직이므로 역할(이동 경로·경비)은 멈춤 (나중에 이어서 가능)
         with DB_LOCK:
-            places.pause_all(DB(), '모드 변경으로 멈춤')
+            places.pause_all(DB(), '지도 만들기 모드로 멈춤')
+            roles.pause_all_guards(DB(), '지도 만들기 모드로 멈춤 (역할 화면에서 재개)')
         ROUTES.stop()
-    if mode == 'patrol':
-        map_name = read_fleet().get('mapFile')
-        if not map_name:
-            raise ValueError('활성 지도가 없습니다. 먼저 지도를 만들고 활성 지도로 지정하세요')
-        MAPPING.stop()
-        if not PATROL.running():
-            PATROL.start(map_name, FLEET_PATH, fleet_db.DB_PATH)
-    else:
         PATROL.stop()
-        if mode != 'mapping':
-            MAPPING.stop()
+    else:
+        MAPPING.stop()
     store.write_mode(mode)
     return mode_status()
 
@@ -649,22 +734,23 @@ def main():
         places.sync_maps(con, [m['name'] for m in maps.list_maps()])
         # 서버를 다시 켜도 로봇이 혼자 경로를 이어 가지 않게: 실행 중이던 경로는 멈춤
         n = places.pause_all(con, '서버 재시작으로 멈춤 (경로 화면에서 이어서)')
+        g = roles.pause_all_guards(con, '서버 재시작으로 멈춤 (역할 화면에서 재개)')   # 경비도 혼자 다시 출발하지 않게
         ver = dbutil.version(con)
     print(f'DB: {fleet_db.DB_PATH} (스키마 버전 {ver})', flush=True)
     old = [f for f in ('places.db', 'alerts.db') if os.path.exists(os.path.join(os.path.dirname(fleet_db.DB_PATH), f))]
     if old:   # DB 를 하나로 합치기 전의 파일 (자동으로 옮기지 않음)
         print(f'참고: data/ 의 {", ".join(old)} (-wal, -shm, .bak-v* 포함)는 더 이상 쓰지 않습니다. 필요 없으면 지워도 됩니다', flush=True)
-    if n:
-        print(f'실행 중이던 이동 경로 {n}개를 멈춤 상태로 바꿨습니다', flush=True)
-    if store.read_mode()['mode'] == 'patrol':   # 다시 켰을 때 경비 모드였으면 이어서
-        try:
-            set_mode('patrol')
-        except Exception as e:  # noqa: BLE001
-            print(f'경비 모드를 다시 시작하지 못했습니다: {e}', flush=True)
-            store.write_mode('operate')
-    elif store.read_mode()['mode'] == 'mapping':
-        store.write_mode('operate')   # 지도 만들기는 이어서 하지 않음
-    threading.Thread(target=patrol_watchdog, daemon=True).start()
+    if n or g:
+        print(f'실행 중이던 이동 경로 {n}개, 경비 {g}대를 멈춤 상태로 바꿨습니다', flush=True)
+    # 지도 만들기는 이어서 하지 않음. 예전 '경비 모드'(patrol) 파일도 운영으로 (경비는 이제 로봇 역할)
+    try:
+        with open(store.MODE_PATH, encoding='utf-8') as f:
+            saved_mode = json.load(f).get('mode')
+    except (OSError, ValueError):
+        saved_mode = 'operate'
+    if saved_mode != 'operate':
+        store.write_mode('operate')
+    threading.Thread(target=guard_watchdog, daemon=True).start()
     threading.Thread(target=route_watchdog, daemon=True).start()
     handler = functools.partial(Handler, directory=a.dir)
     with http.server.ThreadingHTTPServer((a.bind, a.port), handler) as srv:

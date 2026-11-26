@@ -20,7 +20,7 @@ window.App.ready.then(async (App) => {
     const b = $('#mode-banner');
     const m = e.detail.mode;
     if (m !== 'mapping' && !status.running) {
-      b.innerHTML = `<b>지금 모드: ${m === 'patrol' ? '경비' : '운영'}</b><span class="muted">지도 만들기를 시작하면 모드가 '지도 만들기'로 바뀌고 경비는 멈춥니다.</span>`;
+      b.innerHTML = '<b>지금 모드: 운영</b><span class="muted">지도 만들기를 시작하면 모드가 \'지도 만들기\'로 바뀌고, 워커의 이동 경로와 경비는 멈춥니다 (끝낸 뒤 역할 화면에서 이어서·재개).</span>';
       b.classList.remove('hidden');
     } else b.classList.add('hidden');
   });
@@ -226,7 +226,7 @@ window.App.ready.then(async (App) => {
       const info = await App.adminJson('/api/mapping/save', { method: 'POST', body: JSON.stringify({ name }) });
       if ($('#make-active').checked) await App.setActiveMap(name);
       $('#saved').innerHTML = `<div class="check"><span class="ok">✓</span><span class="mono">config/maps/${esc(info.name)}.yaml</span><span class="muted">${info.width}×${info.height}</span></div>
-        <div class="muted" style="font-size: 12px; line-height: 1.6">${$('#make-active').checked ? '활성(기준) 지도로 지정했습니다. ' : ''}다음: 끝내기 → 로봇별 Nav2 (<span class="mono">nav2_ns.launch.py map:=${esc(info.name)}</span>) → <a href="patrol.html">경비 · 순찰 경로</a> / <a href="zones.html?map=${encodeURIComponent(info.name)}">이동 구역</a><br>
+        <div class="muted" style="font-size: 12px; line-height: 1.6">${$('#make-active').checked ? '활성(기준) 지도로 지정했습니다. ' : ''}다음: 끝내기 → 로봇별 Nav2 (<span class="mono">nav2_ns.launch.py map:=${esc(info.name)}</span>) → <a href="roles.html">역할 (워커·경비)</a> / <a href="zones.html?map=${encodeURIComponent(info.name)}">이동 구역</a><br>
         로봇마다 AMCL 초기 위치는 이번 시작 자세 + 지금까지 움직인 만큼입니다 (플릿 화면에서 초기 위치를 다시 찍어도 됨).</div>`;
       toast(`지도 ${name} 를 저장했습니다`, 'ok');
     } catch (e) { toast(`저장 실패: ${e.message}`, 'danger', 6000); }

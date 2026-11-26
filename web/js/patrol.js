@@ -1,4 +1,4 @@
-// 경비 모드: 경보 현황(목록·지도·상세 비교·처리), 순찰 상태, 순찰 경로·감지 설정 편집
+// 경비: 경보 현황(목록·지도·상세 비교·처리), 경비 역할 로봇의 상태·자동 순회 지점, 순회·감지 설정
 window.App.ready.then(async (App) => {
   'use strict';
   const { ros, $, $$, esc, toast } = App;
@@ -8,7 +8,9 @@ window.App.ready.then(async (App) => {
   const KIND = { new: '새로 생긴 것', missing: '사라진 것' };
   const SEV = { high: '높음', medium: '보통', low: '낮음' };
   const STATUS = { open: '미확인', ok: '이상 없음', false: '오탐', baseline: '기준 지도 반영' };
-  const STATE = { patrolling: '순찰 중', inspecting: '확인하러 이동', idle: '대기', no_route: '경로 없음', nav_unavailable: 'Nav2 없음', paused: '멈춤', rejected: 'goal 거부' };
+  const CTRL = { stopped: '정지', running: '경비 중', paused: '멈춤', alarm: '장애물 앞 대기' };
+  const STATE = { patrolling: '순회 중', inspecting: '확인하러 이동', localizing: '위치 기다림 (초기 위치)', no_plan: '갈 수 있는 지점 없음',
+    nav_unavailable: 'Nav2 없음', paused: '멈춤', stopped: '정지', rejected: 'goal 거부', alarm: '장애물 앞 대기' };
 
   const mapName = App.fleet.mapFile;
   const view = new window.RobotView($('#canvas'), { scale: 50 });
@@ -17,7 +19,8 @@ window.App.ready.then(async (App) => {
   view.state.robots = [];
   let mapInfo = null, mapImg = null;
   let alerts = [], filter = 'open', selected = null, detail = null;
-  let patrol = { routes: {}, settings: {} }, dirty = false;
+  let patrol = { settings: {} }, dirty = false;
+  let roleRows = [];               // /api/roles (경비 역할·상태)
   let tab = 'watch';
 
   if (!mapName) {
@@ -50,23 +53,12 @@ window.App.ready.then(async (App) => {
   $('#zoom-in').addEventListener('click', () => view.zoom(1.25));
   $('#zoom-out').addEventListener('click', () => view.zoom(0.8));
 
-  // ---------- 경비 시작/중지 (모드) ----------
+  // ---------- 경비 노드 상태 ----------
   document.addEventListener('tb3:mode', (e) => {
-    const on = e.detail.mode === 'patrol';
-    const b = $('#patrol-toggle');
-    b.textContent = on ? '경비 끝내기' : '경비 시작';
-    b.className = on ? 'btn btn-danger-outline' : 'btn btn-primary';
-    const p = e.detail.patrol || {};
-    $('#patrol-proc').textContent = on ? (p.running ? `감지 노드 실행 중 · ${Math.floor((p.seconds || 0) / 60)}분째` : `감지 노드 정지됨${p.exited !== undefined ? ` (종료 ${p.exited})` : ''}`) : '경비 모드가 아닙니다';
-  });
-  $('#patrol-toggle').addEventListener('click', async () => {
-    const on = App.mode.mode === 'patrol';
-    if (on && !confirm('경비를 끝내고 운영 모드로 바꿀까요? 순찰과 감지가 멈춥니다.')) return;
-    try {
-      await App.adminJson('/api/mode', { method: 'POST', body: JSON.stringify({ mode: on ? 'operate' : 'patrol' }) });
-      await App.pollMode();
-      toast(on ? '경비를 끝냈습니다' : '경비를 시작했습니다', 'ok');
-    } catch (e) { toast(`실패: ${e.message}`, 'danger', 6000); }
+    const g = e.detail.guard || {};
+    $('#patrol-proc').textContent = e.detail.mode !== 'operate' ? '지도 만들기 모드 — 경비는 운영 모드에서만'
+      : g.running ? `경비 노드 실행 중 · ${Math.floor((g.seconds || 0) / 60)}분째 · 경비 중 ${g.active}대${g.alarm ? ` · 장애물 대기 ${g.alarm}대` : ''}`
+        : (g.active ? '경비 노드 다시 시작하는 중' : '경비 중인 로봇 없음 (역할 화면에서 경비 시작)');
   });
 
   // 주기적으로 다시 그리는 곳은 내용이 바뀔 때만 바꿈 (누르려던 버튼이 중간에 사라지지 않게)
@@ -194,10 +186,11 @@ window.App.ready.then(async (App) => {
         await loadMap();
         toast(`기준 지도에 반영 (${r.cells}칸)`, 'ok');
       } else if (b.dataset.act === 'inspect') {
-        const cand = robots.filter((r) => r.online && r.mapPose).sort((p, q) => Math.hypot(p.mapPose.x - a.x, p.mapPose.y - a.y) - Math.hypot(q.mapPose.x - a.x, q.mapPose.y - a.y));
-        if (!cand.length) { toast('지도 위치를 아는 온라인 로봇이 없습니다', 'warn'); return; }
+        const guards = new Set(roleRows.filter((x) => x.role === 'guard' && x.guard_state === 'running').map((x) => x.robot_id));
+        const cand = robots.filter((r) => guards.has(r.id) && r.online && r.mapPose).sort((p, q) => Math.hypot(p.mapPose.x - a.x, p.mapPose.y - a.y) - Math.hypot(q.mapPose.x - a.x, q.mapPose.y - a.y));
+        if (!cand.length) { toast('지도 위치를 아는 경비 중인 로봇이 없습니다', 'warn'); return; }
         ros.publish('/fleet/patrol_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'inspect', robot: cand[0].id, x: a.x, y: a.y }) });
-        toast(`${cand[0].name} 를 #${a.id} 근처로 보냈습니다 (확인 뒤 순찰 재개)`, 'ok');
+        toast(`${cand[0].name} 를 #${a.id} 근처로 보냈습니다 (확인 뒤 순회 재개)`, 'ok');
         return;
       } else if (b.dataset.act === 'link') {
         const url = `${location.origin}${location.pathname}#alert-${a.id}`;
@@ -230,46 +223,58 @@ window.App.ready.then(async (App) => {
     if (p !== 'granted') toast('알림이 허용되지 않았습니다 (https 또는 localhost 에서만 가능할 수 있음)', 'warn');
   });
 
-  // ---------- 순찰 상태 ----------
+  // ---------- 경비 로봇 상태 (DB 경비 상태 + 경비 노드의 세부 상태) ----------
   let pstatus = { robots: {} };
   ros.subscribe('/fleet/patrol_status', 'std_msgs/msg/String', (m) => { try { pstatus = JSON.parse(m.data); pstatus.at = Date.now(); } catch (e) { /* ignore */ } }, { throttle: 1000 });
+  async function loadRoles() {
+    try { roleRows = (await (await fetch('/api/roles', { cache: 'no-store' })).json()).roles || []; } catch (e) { /* 다음에 */ }
+  }
   function renderStatus() {
     const fresh = pstatus.at && Date.now() - pstatus.at < 4000;
-    setHtml('#status-rows', robots.map((r) => {
-      const s = fresh ? pstatus.robots[r.id] : null;
-      const st = s ? (STATE[s.state] || s.state) : (r.online ? '—' : '오프라인');
-      return `<tr><td><span style="display: inline-flex; gap: 8px; align-items: center"><span class="swatch" style="background: ${esc(r.color)}"></span>${esc(r.name)}</span></td>
-        <td>${esc(st)}</td><td class="mono">${s && s.points ? `${s.waypoint + 1} / ${s.points}` : '—'}</td><td class="num">${s ? s.laps : '—'}</td>
+    const guards = roleRows.filter((x) => x.role === 'guard');
+    setHtml('#status-rows', guards.length ? guards.map((row) => {
+      const r = byId(row.robot_id) || { name: row.robot_id, color: '#8B949E', online: false, batteryText: () => '—' };
+      const s = fresh ? pstatus.robots[row.robot_id] : null;
+      const gs = row.guard_state;
+      let st = esc(CTRL[gs] || gs);
+      if (gs === 'running' && s) st = esc(STATE[s.state] || s.state);
+      if (gs === 'alarm') st = `<b class="sev-high">장애물 앞 대기${row.alarm_alert_id ? ` · <a href="#alert-${row.alarm_alert_id}">경보 #${row.alarm_alert_id}</a>` : ''}</b>`;
+      const btn = gs === 'running' || gs === 'alarm' ? `<button class="btn btn-sm" data-pr="${esc(row.robot_id)}" data-cmd="pause">멈춤</button>` : '';
+      const btn2 = gs === 'paused' || gs === 'alarm' ? `<button class="btn btn-sm${gs === 'alarm' ? ' btn-primary' : ''}" data-pr="${esc(row.robot_id)}" data-cmd="resume">재개</button>` : '';
+      const start = gs === 'stopped' ? '<a class="btn btn-sm" href="roles.html" style="text-decoration: none">시작은 역할 화면</a>' : '';
+      return `<tr${gs === 'alarm' ? ' style="background: rgba(248,113,113,0.08)"' : ''}><td><span style="display: inline-flex; gap: 8px; align-items: center"><span class="swatch" style="background: ${esc(r.color)}"></span>${esc(r.name)}</span></td>
+        <td>${st}</td><td class="mono">${s && s.points ? `${Math.min(s.waypoint + 1, s.points)} / ${s.points}` : '—'}</td><td class="num">${s ? s.laps : '—'}</td>
         <td>${s ? (s.localized ? '<span class="badge ok">됨</span>' : '<span class="badge warn">안 됨</span>') : '—'}</td>
         <td class="mono" style="font-size: 12px">${esc(r.batteryText())}</td>
-        <td>${s ? `<button class="btn btn-sm" data-pr="${esc(r.id)}" data-cmd="${s.paused ? 'resume' : 'pause'}">${s.paused ? '재개' : '멈춤'}</button>` : ''}</td></tr>`;
-    }).join(''));
+        <td style="white-space: nowrap">${btn} ${btn2}${start}</td></tr>`;
+    }).join('') : '<tr><td colspan="7" class="muted">경비 역할인 로봇이 없습니다 → <a href="roles.html">역할 화면</a>에서 경비로 지정하세요</td></tr>');
     view.state.robots = robots.filter((r) => r.online && r.mapPose).map((r) => ({ name: r.name, color: r.color, pose: r.mapPose, selected: false }));
+    // 지금 경비 중인 로봇의 자동 순회 지점
+    view.state.routes = fresh ? Object.entries(pstatus.robots || {}).filter(([, x]) => x.plan && x.plan.length)
+      .map(([id, x]) => ({ color: (byId(id) || { color: '#8B949E' }).color, loop: true, highlight: false, points: x.plan })) : [];
+    const plans = fresh ? Object.entries(pstatus.robots || {}).filter(([, x]) => x.points) : [];
+    $('#plan-info').textContent = plans.length ? `지금 순회 지점: ${plans.map(([id, x]) => `${(byId(id) || { name: id }).name} ${x.points}개`).join(' · ')}` : '경비 중인 로봇이 없어 순회 지점이 없습니다';
     view.invalidate();
   }
   setInterval(renderStatus, 1000);
-  $('#status-rows').addEventListener('click', (e) => {
+  setInterval(loadRoles, 2000);
+  await loadRoles();
+  $('#status-rows').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-pr]'); if (!b) return;
-    ros.publish('/fleet/patrol_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: b.dataset.cmd, robot: b.dataset.pr }) });
+    const id = b.dataset.pr, cmd = b.dataset.cmd;
+    try {
+      if (cmd === 'pause') {
+        ros.publish('/fleet/patrol_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'pause', robot: id }) });
+        const r = await fetch(`/api/roles/${encodeURIComponent(id)}/guard/pause`, { method: 'POST' });
+        if (!r.ok) throw new Error((await r.json()).error);
+      } else await App.adminJson(`/api/roles/${encodeURIComponent(id)}/guard/resume`, { method: 'POST', body: '{}' });
+      await loadRoles(); renderStatus();
+    } catch (err) { toast(`실패: ${err.message}`, 'danger'); }
   });
 
-  // ---------- 순찰 경로 · 감지 설정 ----------
+  // ---------- 순회 · 감지 설정 ----------
   patrol = await (await fetch(`/api/patrol/${encodeURIComponent(mapName)}`, { cache: 'no-store' })).json();
-  const routeSel = $('#route-robot');
-  routeSel.innerHTML = robots.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('');
-  const curRoute = () => (patrol.routes[routeSel.value] ||= { points: [], enabled: true });
   function setDirty(d) { dirty = d; $('#routes-save').disabled = !d; }
-  function drawRoutes() {
-    view.state.routes = robots.map((r) => ({ color: r.color, loop: true, highlight: tab === 'routes' && r.id === routeSel.value, points: (patrol.routes[r.id] || {}).points || [] }))
-      .filter((x) => tab === 'watch' || x.highlight || x.points.length);
-    view.invalidate();
-  }
-  function renderRoute() {
-    const rt = curRoute();
-    $('#route-enabled').checked = rt.enabled;
-    $('#wp-list').innerHTML = rt.points.length ? rt.points.map((p, i) => `<div class="wp"><span class="badge">${i + 1}</span><span class="mono">(${p[0].toFixed(2)}, ${p[1].toFixed(2)})</span><button class="btn btn-sm" data-del="${i}" aria-label="${i + 1}번 지점 빼기">빼기</button></div>`).join('') : '<div class="empty">지점이 없습니다</div>';
-    drawRoutes();
-  }
   function renderSettings() {
     const s = patrol.settings;
     $$('[data-s]').forEach((i) => { if (i.type === 'checkbox') i.checked = !!s[i.dataset.s]; else i.value = s[i.dataset.s]; });
@@ -278,21 +283,18 @@ window.App.ready.then(async (App) => {
     $('#s-max_range').textContent = `${Number(s.max_range).toFixed(1)} m`;
     $('#s-tol').textContent = `${Number(s.tol).toFixed(2)} m`;
     $('#s-decay').textContent = `${s.decay}초`;
+    $('#s-spacing').textContent = `${Number(s.spacing).toFixed(1)} m`;
+    $('#s-alarm_interval').textContent = `${s.alarm_interval}초`;
   }
   $$('[data-s]').forEach((i) => i.addEventListener('input', () => {
     patrol.settings[i.dataset.s] = i.type === 'checkbox' ? i.checked : Number(i.value);
     renderSettings(); setDirty(true);
   }));
-  routeSel.addEventListener('change', renderRoute);
-  $('#route-enabled').addEventListener('change', (e) => { curRoute().enabled = e.target.checked; setDirty(true); });
-  $('#wp-list').addEventListener('click', (e) => { const b = e.target.closest('[data-del]'); if (b) { curRoute().points.splice(Number(b.dataset.del), 1); setDirty(true); renderRoute(); } });
-  $('#wp-undo').addEventListener('click', () => { curRoute().points.pop(); setDirty(true); renderRoute(); });
-  $('#wp-clear').addEventListener('click', () => { if (confirm('이 로봇의 순찰 지점을 모두 지울까요?')) { curRoute().points = []; setDirty(true); renderRoute(); } });
   $('#routes-save').addEventListener('click', async () => {
     try {
-      patrol = { ...patrol, ...(await App.adminJson(`/api/patrol/${encodeURIComponent(mapName)}`, { method: 'PUT', body: JSON.stringify({ routes: patrol.routes, settings: patrol.settings }) })) };
-      setDirty(false); renderRoute(); renderSettings();
-      toast('순찰 경로·감지 설정을 저장했습니다', 'ok');
+      patrol = { ...patrol, ...(await App.adminJson(`/api/patrol/${encodeURIComponent(mapName)}`, { method: 'PUT', body: JSON.stringify({ settings: patrol.settings }) })) };
+      setDirty(false); renderSettings();
+      toast('순회·감지 설정을 저장했습니다 (경비 중이면 5초 안에 반영)', 'ok');
     } catch (e) { toast(`저장 실패: ${e.message}`, 'danger', 6000); }
   });
   window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
@@ -304,16 +306,13 @@ window.App.ready.then(async (App) => {
     $('#right-watch').classList.toggle('hidden', t !== 'watch');
     $('#bottom-watch').classList.toggle('hidden', t !== 'watch');
     $('#left-routes').classList.toggle('hidden', t !== 'routes');
-    $('#route-hint').classList.toggle('hidden', t !== 'routes');
-    view.onPointClick = t === 'routes' ? (x, y) => { curRoute().points.push([Number(x.toFixed(2)), Number(y.toFixed(2))]); setDirty(true); renderRoute(); } : null;
     view.state.zones = t === 'watch' ? view.state.zones : [];
     if (t === 'watch') drawAlerts();
-    drawRoutes();
     view.resize(); view.invalidate();
   }
   $$('[data-tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
 
-  renderRoute(); renderSettings(); setTab('watch');
+  renderSettings(); setTab('watch'); renderStatus();
   await loadAlerts();
   const m = location.hash.match(/^#alert-(\d+)$/);
   // 같은 페이지에서 경보 링크(#alert-N)를 열면 다시 불러오지 않고 hash 만 바뀜

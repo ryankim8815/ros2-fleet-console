@@ -339,7 +339,7 @@ ros2-fleet-console/
 │   ├── fleet.json           로봇 목록 + 활성 지도 (setup.html·지도 화면에서 저장)
 │   ├── mode.json            운영 모드
 │   ├── maps/ zones/ masks/  지도 · 이동 구역 · 로봇별 keepout 마스크
-│   └── patrol/<지도>.json   순찰 경로 + 감지 설정
+│   └── patrol/<지도>.json   경비 감지·순회 설정 (순회 간격, 대기 알림 간격)
 ├── data/alerts.db           경보 (SQLite)
 ├── docs/
 │   ├── architecture.md      ← 이 문서
@@ -355,10 +355,12 @@ ros2-fleet-console/
 │   ├── mapping_ns.launch.py 로봇 한 대 slam_toolbox
 │   ├── coop_mapping.launch.py 여러 로봇 함께 지도 만들기 (PC, 웹이 실행)
 │   ├── map_merge_node.py    로봇별 지도 합치기 → /map_merged
-│   └── patrol_node.py       경비: 순찰 + 변화 감지 + 경보 (PC, 웹이 실행)
+│   └── patrol_node.py       경비 노드: 경비 역할 로봇의 자동 순회 + 변화 감지 + 경보 + 장애물 앞 대기 (PC, 웹이 실행)
 ├── serve.py                 정적 파일 + /api/* + 경비 감시(재시작)
 ├── maps.py                  지도·구역·마스크·기준 지도 반영, 지도 만들기·경비 프로세스
-├── patrol_store.py          모드 · 순찰 설정 · 경보 DB
+├── patrol_store.py          모드 · 경비 설정 · 경보 DB
+├── roles.py                 로봇 역할(워커·경비) · 경비 상태 (DB robot_roles)
+├── coverage.py              경비 순회 지점 자동 생성
 └── web/
     ├── fleet.html           플릿
     ├── index.html           로봇 대시보드
@@ -367,7 +369,8 @@ ros2-fleet-console/
     ├── setup.html           로봇 등록
     ├── mapping.html         지도 만들기 (여러 로봇)
     ├── zones.html           이동 구역
-    ├── patrol.html          경비 (경보 · 순찰 경로 · 감지 설정)
+    ├── roles.html           역할 (워커·경비 지정, 시작·멈춤·재개)
+    ├── patrol.html          경비 (경보 · 자동 순회 지점 · 감지 설정)
     ├── alerts.html          경보 (모바일)
     ├── css/app.css
     └── js/
@@ -375,7 +378,7 @@ ros2-fleet-console/
         ├── robot.js         프로필 · Robot · Pose2
         ├── common.js        공통 (window.App)
         ├── view.js          캔버스 뷰
-        ├── fleet.js, dashboard.js, interfaces.js, mobile.js, setup.js, mapping.js, zones.js, patrol.js
+        ├── fleet.js, roles.js, dashboard.js, interfaces.js, mobile.js, setup.js, mapping.js, zones.js, patrol.js
 ```
 
 관련 설정: `pixi.toml` 의 `ros-jazzy-rosbridge-suite` 의존성과 `web` 태스크.
@@ -556,27 +559,24 @@ costmap 노드는 `/<ns>/global_costmap` 안에 있어 상대 토픽 이름이 �
 
 ---
 
-## 12. 운영 모드 · 함께 지도 만들기 · 경비
+## 12. 운영 모드 · 로봇 역할 · 함께 지도 만들기 · 경비
 
-### 모드
+### 모드와 역할
 
 ```mermaid
 stateDiagram-v2
-    state "운영" as operate
-    state "지도 만들기" as mapping
-    state "경비" as patrol
+    state "운영 (로봇마다 역할대로)" as operate
+    state "지도 만들기 (역할 모두 멈춤)" as mapping
     [*] --> operate
-    operate --> mapping: 지도 화면에서 시작
-    mapping --> operate: 끝내기
-    operate --> patrol: 활성 지도 있음
-    patrol --> operate: 모드 칩
-    mapping --> patrol: 지도 만들기 정지
-    patrol --> mapping: 경비 정지
+    operate --> mapping: 지도 화면에서 시작 · 모드 칩
+    mapping --> operate: 끝내기 · 모드 칩
 ```
 
-- `config/mode.json` 에 저장. 서버를 다시 켜면 경비는 이어서, 지도 만들기는 운영으로 돌아갑니다.
-- 모드 바꾸기는 관리자 토큰 필요. 경비로 갈 때 서버가 `patrol_node` 를 띄우고, 다른 모드로 가면 끕니다.
-- `patrol_watchdog` 스레드: 경비 모드인데 프로세스가 죽어 있으면 다시 띄움(5초 → 최대 60초 간격). `/api/mode` 의 `patrol.restarts` 로 보이고, 모드 칩이 "감지 멈춤"으로 바뀝니다.
+- 모드는 `config/mode.json` (`operate` | `mapping`). 서버를 다시 켜면 운영으로 (예전 `patrol` 도 운영으로).
+- 운영 모드에서 로봇마다 역할(`robot_roles`): **워커** = 이동 경로 반복(`route_runner_node`), **경비** = 자동 순회 + 감시(`patrol_node`), 없음 = 수동 조종.
+- 지도 만들기로 가면 서버가 이동 경로·경비를 모두 멈춤(paused)으로 바꾸고 실행기·경비 노드를 끕니다.
+- 경비 상태(`robot_roles.guard_state`): `stopped` → (시작) `running` ⇄ (멈춤·비상정지·모드·서버 재시작 / 재개) `paused`; `running` → (새 장애물 경보) `alarm` → (경보 처리 또는 재개) `running`.
+- `guard_watchdog` 스레드: 운영 모드에서 `running`·`alarm` 인 경비가 있는데 `patrol_node` 가 죽어 있으면 다시 띄움(5초 → 최대 60초 간격), 없으면 끔. `/api/mode` 의 `guard.restarts`·`active`·`alarm` 로 보이고, 모드 칩이 "경비 노드 멈춤"으로 바뀝니다.
 
 ### 함께 지도 만들기
 
@@ -602,15 +602,18 @@ flowchart TB
     subgraph PN["patrol_node.py (PC)"]
         RW1["RobotWatch tb3_01<br/>/tf:=/tb3_01/tf"]
         RW2["RobotWatch pinky_01<br/>/tf:=/pinky_01/tf"]
-        CORE["PatrolNode<br/>기준 지도 · 설정 다시 읽기(5초)<br/>경보 합치기 · 등급"]
+        CORE["PatrolNode<br/>경비 상태 읽기(1초) · 순회 지점 계획(coverage.py)<br/>기준 지도 · 설정 다시 읽기(5초) · 경보 합치기 · 등급"]
     end
     SC["&lt;ns&gt;/scan"] --> RW1 & RW2
     RW1 & RW2 -->|"새/사라진 칸 → 덩어리"| CORE
-    CORE --> DB[("data/alerts.db")]
+    CORE <-->|"alerts · robot_roles"| DB[("data/fleet.db")]
+    WEB["roles.html · patrol.html<br/>시작·멈춤·재개·경보 처리"] -->|"/api/roles · /api/alerts"| DB
     CORE -->|"/fleet/alerts"| UI["모든 웹 화면<br/>토스트 · 소리 · 알림"]
-    CORE -->|"/fleet/patrol_status"| PT["patrol.html"]
-    PT -->|"/fleet/patrol_cmd<br/>pause · resume · inspect"| CORE
+    CORE -->|"/fleet/patrol_status<br/>상태·순회 지점·대기"| UI
+    WEB -->|"/fleet/patrol_cmd<br/>pause · inspect"| CORE
     RW1 & RW2 -->|"follow_waypoints · navigate_to_pose"| NAV["로봇별 Nav2"]
+    RW1 -->|"장애물 대기: &lt;ns&gt;/sound (ERROR)"| TB["TurtleBot3 부저"]
+    RW2 -->|"장애물 대기: set_led · set_emotion"| PK["Pinky LED·LCD"]
 ```
 
 감지 (스캔마다, 0.4초 간격):
@@ -624,16 +627,21 @@ flowchart TB
 | 5. 덩어리 | 8방향 이웃으로 묶음. 넓이 = 감싸는 상자(두께 최소 0.1 m), `min_area` 미만·3칸 미만은 버림 |
 | 6. 경보 | 0.5 m 안 같은 종류의 열린 경보가 있으면 갱신(상자 합치기 ≤2 m, 로봇·횟수), 30분 안에 처리한 곳이면 무시, 아니면 새 경보 + 주변 스캔 점(≤400) 저장 |
 
-순찰: 로봇마다 경로가 있으면 `follow_waypoints` 로 한 바퀴씩 반복(바퀴 수). `inspect` 는 순찰을 취소하고 경보에서 로봇 쪽으로 0.6 m 떨어진 곳으로 `navigate_to_pose`, 끝나면 순찰로 돌아갑니다. Nav2 가 없으면 30초 동안 "Nav2 없음"으로 기다립니다.
+순회: 경비 중인 로봇들의 지점을 `coverage.plan` 으로 만듦 (갈 수 있는 칸 = 빈 칸에서 몸체 반지름 + 12 cm 여유, 이동 구역 안, 로봇과 이어진 영역 → `spacing` 격자 + 좁은 곳 메우기 → 지그재그 → 로봇 수만큼 이어진 덩어리로 나눔). 로봇 구성·지도·구역·간격이 바뀔 때만 다시 계산. 로봇마다 `follow_waypoints` 로 남은 지점을 보내고(다음 지점을 바라보는 방향), 다 돌면 처음부터. 멈췄다 재개하면 멈춘 지점부터.
+장애물 대기: 경비 중에 `new` 경보를 **새로 만들면** `robot_roles` 를 `alarm`(경보 id) 로 바꾸고 goal 취소, `alarm_interval` 마다 부저·LED. 1초마다 그 경보가 열림이 아니면(처리됨) `running` 으로 되돌리고 이어서 돎. `inspect` 는 경비 중인 로봇의 순회를 취소하고 경보에서 로봇 쪽으로 0.6 m 떨어진 곳으로 `navigate_to_pose`, 끝나면 순회로 돌아갑니다. Nav2 가 없으면 "Nav2 없음"으로 기다립니다.
 
 ### 경비 API
 
 | 요청 | 토큰 | 내용 |
 | --- | --- | --- |
 | `GET /api/mode` | — | 모드 + 지도 만들기·경비 프로세스 상태 |
-| `POST /api/mode` `{mode}` | 필요 | `operate` / `mapping` / `patrol` |
-| `GET /api/patrol/<지도>` | — | 순찰 경로 + 감지 설정 |
-| `PUT /api/patrol/<지도>` | 필요 | 저장 (로봇마다 점 100개 이하, 설정 범위 검사) |
+| `POST /api/mode` `{mode}` | 필요 | `operate` / `mapping` |
+| `GET /api/roles` | — | 로봇별 역할·경비 상태 + 경비 노드 상태 |
+| `PUT /api/roles/<로봇>` `{role}` | 필요 | `worker` / `guard` / `null` |
+| `POST /api/roles/<로봇>/guard/start\|resume` | 필요 | 경비 시작·재개 (운영 모드·활성 지도) |
+| `POST /api/roles/<로봇>/guard/pause\|stop` | — (같은 출처) | 경비 멈춤·정지 |
+| `GET /api/patrol/<지도>` | — | 감지·순회 설정 |
+| `PUT /api/patrol/<지도>` `{settings}` | 필요 | 저장 (설정 범위 검사) |
 | `GET /api/alerts?map=&status=&limit=&since=` | — | 경보 목록 + 개수 |
 | `GET /api/alerts/<id>` | — | 경보 (발견 당시 스캔 점 포함) |
 | `POST /api/alerts/<id>` `{status}` | — (같은 출처) | `ok` 이상 없음 / `false` 오탐 / `open` 다시 열기 |

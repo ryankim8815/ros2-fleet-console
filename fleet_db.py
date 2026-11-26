@@ -13,6 +13,7 @@
            alert_robots       경보를 본 로봇마다 한 줄 (처음·마지막 본 시각, 횟수)
   안전     safety_settings    LiDAR 안전 구역 플릿 기본값 (켜짐, 정지·서행 거리, 서행 속도). 한 줄 (v2)
            robot_safety       로봇별 덮어쓰기 (줄이 없는 로봇은 기본값) (v2)
+  역할     robot_roles        로봇 역할 worker(이동 경로 반복) | guard(자율 경비) + 경비 상태·대기 중인 경보 (v2)
            safety_changes     안전 구역을 바꿀 때마다 한 줄 (시각, 값, 바꾼 화면) (v2)
 
 읽고 쓰는 함수는 places.py(지점·경로·할당), patrol_store.py(경보), safety.py(LiDAR 안전 구역)에 있습니다.
@@ -153,10 +154,15 @@ SAFETY_DEFAULTS = {'enabled': True, 'stop_dist': 0.20, 'slow_dist': 0.50, 'slow_
 SAFETY_LIMITS = {'stop_dist': (0.05, 1.0), 'slow_dist': (0.10, 2.0), 'slow_speed': (0.01, 0.22)}
 SAFETY_MIN_GAP = 0.05   # 서행 거리 ≥ 정지 거리 + 이 값 (m)
 
+# 로봇 역할 (robot_roles)
+ROLES = ('worker', 'guard')
+# 경비 상태: stopped 안 함 · running 경비 중 · paused 멈춤(사용자·비상정지·모드 변경·서버 재시작) · alarm 장애물 앞 대기
+GUARD_STATES = ('stopped', 'running', 'paused', 'alarm')
+
 
 def _v2(con):
     """LiDAR 안전 구역: 플릿 기본값 한 줄(safety_settings, id = 1) + 로봇별 덮어쓰기(robot_safety)
-    + 바꿀 때마다 한 줄(safety_changes)"""
+    + 바꿀 때마다 한 줄(safety_changes). 로봇 역할(robot_roles: 워커·경비, 경비 상태)"""
     (s0, s1), (l0, l1), (v0, v1) = (SAFETY_LIMITS[k] for k in ('stop_dist', 'slow_dist', 'slow_speed'))
     cols = f'''
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
@@ -188,6 +194,17 @@ CREATE TABLE safety_changes (
 );
 CREATE INDEX safety_changes_t ON safety_changes(t);
 CREATE INDEX safety_changes_robot ON safety_changes(robot_id, t);
+
+CREATE TABLE robot_roles (
+  robot_id TEXT PRIMARY KEY REFERENCES robots(id),   -- 줄이 없는 로봇 = 역할 없음 (수동 조종만)
+  role TEXT NOT NULL CHECK (role IN {ROLES}),          -- worker = 이동 경로 반복, guard = 자율 경비
+  guard_state TEXT NOT NULL DEFAULT 'stopped' CHECK (guard_state IN {GUARD_STATES}),
+  alarm_alert_id INTEGER REFERENCES alerts(id) ON DELETE SET NULL,   -- alarm: 이 경보(새로 생긴 장애물) 앞에서 대기
+  message TEXT NOT NULL DEFAULT '' CHECK (length(message) <= 200),
+  updated_at REAL NOT NULL,
+  CHECK (role = 'guard' OR guard_state = 'stopped'),
+  CHECK (guard_state = 'alarm' OR alarm_alert_id IS NULL)
+);
 ''')
     d = SAFETY_DEFAULTS
     con.execute('INSERT INTO safety_settings (id, enabled, stop_dist, slow_dist, slow_speed, updated_at) '
