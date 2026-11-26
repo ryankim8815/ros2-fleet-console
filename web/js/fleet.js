@@ -38,6 +38,7 @@ window.App.ready.then((App) => {
   // ================= 지도 =================
   const view = new window.RobotView($('#canvas'), { scale: 50 });
   view.state.robots = [];
+  App.attachObstacle(view);   // 출구 깃발 + 장애물 처리 중이면 장애물·밀 길·로봇 자리
   view.layers.scan = false;
   view.emptyText = '지도 위 위치를 아는 로봇이 없습니다 (map → <ns>/odom TF 필요: AMCL 또는 SLAM)';
   const MAP = App.fleet.mapTopic || '/map';
@@ -87,9 +88,11 @@ window.App.ready.then((App) => {
     const md = $('#min-dist');
     md.classList.toggle('hidden', !best);
     if (best) {
-      md.textContent = `로봇 간 최소 거리 ${best.d.toFixed(2)} m (${best.a.name} ↔ ${best.b.name})`;
-      md.dataset.level = best.d < MIN_DIST_WARN ? 'bad' : best.d < MIN_DIST_WARN * 2 ? 'warn' : 'ok';
-      const close = best.d < MIN_DIST_WARN;
+      // 장애물 처리 중에는 로봇들이 일부러 나란히 붙어 밀므로 경고하지 않음
+      const teamwork = App.mode.mode === 'obstacle';
+      md.textContent = `로봇 간 최소 거리 ${best.d.toFixed(2)} m (${best.a.name} ↔ ${best.b.name})${teamwork ? ' · 장애물 처리 중 (함께 밂)' : ''}`;
+      md.dataset.level = teamwork ? 'ok' : best.d < MIN_DIST_WARN ? 'bad' : best.d < MIN_DIST_WARN * 2 ? 'warn' : 'ok';
+      const close = !teamwork && best.d < MIN_DIST_WARN;
       if (close && !minDistWarned) event(null, 'WARN', `${best.a.name} 와 ${best.b.name} 가 ${best.d.toFixed(2)} m 까지 가까워졌습니다`);
       minDistWarned = close;
     }

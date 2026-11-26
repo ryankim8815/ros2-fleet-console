@@ -18,6 +18,7 @@ window.App.ready.then(async (App) => {
   view.follow = false;
   view.emptyText = '';
   view.state.robots = [];
+  App.attachObstacle(view);   // 출구 깃발 + 장애물 처리 중이면 장애물·밀 길·로봇 자리
   let mapInfo = null, mapImg = null;
   let alerts = [], filter = 'open', selected = null, detail = null;
   let patrol = { settings: {} }, dirty = false;

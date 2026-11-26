@@ -394,6 +394,7 @@
     // 위에서 취소되지 않음 → 토픽으로 바로 취소하고, 서버 DB 에도 멈춤으로 기록 (노드가 꺼져 있어도)
     ros.publish('/fleet/patrol_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'pause', robot: '*' }) });
     ros.publish('/fleet/route_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'pause', robot: '*' }) });
+    ros.publish('/fleet/obstacle_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'abort' }) });   // 장애물 처리 중이면 중단
     fetch('/api/assignments/pause-all', { method: 'POST' }).catch(() => {});
     document.dispatchEvent(new CustomEvent('tb3:estop'));
     toast(`비상정지: 로봇 ${robots.length}대에 정지 명령을 보내고 진행 중인 goal 을 취소했습니다 · 워커의 이동 경로와 경비도 모두 멈춤 (역할 화면에서 이어서·재개)`, 'danger');
@@ -458,7 +459,7 @@
 
   // ---------- 운영 모드 (운영 / 지도 만들기) + 경보 배지 + 경비 장애물 대기 알림 — 모든 페이지 상단 ----------
   // 운영 모드에서는 로봇마다 역할(워커·경비, roles.html)대로 움직이고, 지도 만들기 모드에서는 역할이 모두 멈춤
-  const MODE_LABEL = { operate: '운영', mapping: '지도 만들기' };
+  const MODE_LABEL = { operate: '운영', mapping: '지도 만들기', obstacle: '장애물 처리' };
   let modeState = { mode: 'operate' };
   let openAlerts = 0;
   function modeWidget() {
@@ -493,9 +494,85 @@
     if (a) { a.textContent = `확인 안 한 경보 ${openAlerts}`; a.classList.toggle('hidden', !openAlerts); }
     document.dispatchEvent(new CustomEvent('tb3:mode', { detail: modeState }));
   }
+  // ---------- 장애물 처리 (운영 중 경비가 새 장애물을 찾고 출구가 있으면 서버가 자동으로) — 모든 화면 위 배너 ----------
+  let obstacleState = { run: null };
+  let obstacleTimer = null;
+  let obstacleBeepAt = 0;
+  let obstacleSeenEnd = 0;          // 끝난 결과를 보여 준 처리 번호 (한 번만)
+  async function loadObstacle() {
+    try { obstacleState = await (await fetch('/api/obstacle', { cache: 'no-store' })).json(); } catch (e) { return; }
+    renderObstacle();
+    document.dispatchEvent(new CustomEvent('tb3:obstacle', { detail: obstacleState }));
+  }
+  function watchObstacle(on) {
+    if (on && !obstacleTimer) { loadObstacle(); obstacleTimer = setInterval(loadObstacle, 1000); }
+    if (!on && obstacleTimer) { clearInterval(obstacleTimer); obstacleTimer = null; loadObstacle(); }
+  }
+  function renderObstacle() {
+    const run = obstacleState.run;
+    let b = $('#obstacle-banner');
+    const active = run && ['gathering', 'signal1', 'pushing', 'signal2'].includes(run.state);
+    const fresh = run && !active && run.finished_at && Date.now() / 1000 - run.finished_at < 60 && obstacleSeenEnd !== run.id;
+    if (!active && !fresh) { if (b) b.remove(); return; }
+    if (!b) {
+      b = document.createElement('div');
+      b.id = 'obstacle-banner';
+      b.setAttribute('role', 'status');
+      const bar = $('.topbar') || $('header');
+      if (bar) bar.insertAdjacentElement('afterend', b); else document.body.prepend(b);
+      b.addEventListener('click', async (e) => {
+        if (e.target.closest('[data-ob-abort]')) {
+          if (!confirm('장애물 처리를 중단할까요? 모든 로봇이 그 자리에 멈추고, 역할(이동 경로·경비)은 멈춘 채로 운영 모드로 돌아갑니다.')) return;
+          ros.publish('/fleet/obstacle_cmd', 'std_msgs/msg/String', { data: JSON.stringify({ cmd: 'abort' }) });
+          try { await fetch('/api/obstacle/abort', { method: 'POST' }); } catch (err) { /* 비상정지로 */ }
+          loadObstacle();
+        }
+        if (e.target.closest('[data-ob-close]')) { obstacleSeenEnd = obstacleState.run && obstacleState.run.id; renderObstacle(); }
+      });
+    }
+    const team = Object.keys((run.plan && run.plan.robots) || {}).map((id) => (robots.find((r) => r.id === id) || { name: id }).name);
+    const cls = active ? 'active' : run.state === 'done' ? 'done' : 'bad';
+    b.className = `obstacle-banner ${cls}`;
+    const html = `<b>장애물 처리 #${run.id} · ${esc(run.label)}</b>
+      ${run.state === 'pushing' ? `<span class="ob-bar" aria-label="진행 ${Math.round(run.progress * 100)}%"><span style="width: ${Math.round(run.progress * 100)}%"></span></span><span class="mono">${Math.round(run.progress * 100)}%</span>` : ''}
+      <span class="muted">${esc(run.message || '')}</span>
+      ${team.length ? `<span class="muted">· ${esc(team.join(', '))}</span>` : ''}
+      ${run.alert_id ? `<a href="patrol.html#alert-${run.alert_id}">경보 #${run.alert_id}</a>` : ''}
+      <span class="spacer"></span>
+      ${active ? '<button class="btn btn-sm btn-danger-outline" data-ob-abort>중단</button>' : '<button class="btn btn-sm" data-ob-close aria-label="닫기">닫기</button>'}`;
+    if (b.dataset.html !== html) { b.innerHTML = html; b.dataset.html = html; }
+    // 모여서·도착해서 소리 내는 동안 관제 화면도 1초마다 짧게 (Pinky 처럼 소리를 못 내는 로봇 대신)
+    if (active && (run.state === 'signal1' || run.state === 'signal2') && Date.now() - obstacleBeepAt > 950) {
+      obstacleBeepAt = Date.now();
+      try {
+        const ac = new (window.AudioContext || window.webkitAudioContext)();
+        const o = ac.createOscillator(); const g = ac.createGain();
+        o.frequency.value = run.state === 'signal1' ? 880 : 1175; g.gain.value = 0.08; o.connect(g); g.connect(ac.destination);
+        o.start(); o.stop(ac.currentTime + 0.2); setTimeout(() => ac.close(), 500);
+      } catch (e) { /* 소리 불가 */ }
+    }
+  }
+
+  // 지도에 출구와 진행 중인 장애물 처리(장애물, 출구까지 밀 길, 로봇 자리, 추정 위치)를 그림 (플릿·경비 화면)
+  function attachObstacle(view) {
+    const apply = (d) => {
+      view.state.exit = d && d.exit ? { x: d.exit.x, y: d.exit.y, radius: d.exit.radius } : null;
+      const run = d && d.run;
+      const active = run && ['gathering', 'signal1', 'pushing', 'signal2'].includes(run.state);
+      view.state.obstacle = active ? {
+        ...run.obstacle, ...((run.plan || {}).obstacle || {}), path: (run.plan || {}).path,   // 로봇들이 마지막으로 잰 장애물 est: (run.plan || {}).est, label: `장애물 · ${run.label}`,
+        slots: Object.entries((run.plan || {}).robots || {}).map(([id, sl]) => ({ ...sl, color: (robots.find((r) => r.id === id) || {}).color })),
+      } : null;
+      view.invalidate();
+    };
+    document.addEventListener('tb3:obstacle', (e) => apply(e.detail));
+    apply(obstacleState);
+  }
+
   async function pollMode() {
     try {
       modeState = await (await fetch('/api/mode', { cache: 'no-store' })).json();
+      watchObstacle(modeState.mode === 'obstacle');
       if (fleet.mapFile) {
         const r = await (await fetch(`/api/alerts?map=${encodeURIComponent(fleet.mapFile)}&status=open&limit=1`, { cache: 'no-store' })).json();
         openAlerts = (r.counts && r.counts.open) || 0;
@@ -636,6 +713,10 @@
     const online = robots.filter((r) => r.online).length;
     const chk = (ok, text, sub) => `<div class="check"><span class="${ok ? 'ok' : 'unk'}">${ok ? '✓' : '!'}</span><span>${esc(text)}${sub ? `<span class="muted" style="display: block; font-size: 11px">${esc(sub)}</span>` : ''}</span><span></span></div>`;
     const cur = modeState.mode;
+    if (cur === 'obstacle') {   // 장애물 처리 중에는 모드를 바꿀 수 없음 (배너의 중단으로)
+      toast('장애물 처리 중입니다. 모드를 바꾸려면 위 배너에서 먼저 중단하세요', 'warn', 5000);
+      return;
+    }
     const opt = (m, title, desc) => `<label class="mode-opt${m === cur ? ' cur' : ''}"><input type="radio" name="mode" value="${m}" ${m === cur ? 'checked' : ''}><span><b>${title}</b>${m === cur ? ' <span class="badge">지금</span>' : ''}<br><span class="muted" style="font-size: 12px">${desc}</span></span></label>`;
     dlg.innerHTML = `<form method="dialog" class="col" style="gap: 12px">
       <div class="panel-head" style="justify-content: space-between"><h2 style="font-size: 17px">운영 모드 바꾸기</h2><button value="cancel" class="btn btn-icon" aria-label="닫기">✕</button></div>
@@ -670,6 +751,7 @@
   const App = {
     ros, store, $, $$, esc, fmt, toast, toastAction, estop, trackGoal, robotUrl, control,
     get mode() { return modeState; }, openModeDialog, pollMode,
+    get obstacle() { return obstacleState; }, loadObstacle, attachObstacle,
     get safety() { return safety; }, openSafetyDialog, loadSafety,
     watchPaths, pathsFor,
     get fleet() { return fleet; },
@@ -688,7 +770,7 @@
       await loadZones();
       await loadSafety();
       bindHeader();
-      if (!document.body.dataset.noMode) { modeWidget(); pollMode(); setInterval(pollMode, 3000); watchAlerts(); }
+      if (!document.body.dataset.noMode) { modeWidget(); pollMode(); setInterval(pollMode, 3000); watchAlerts(); loadObstacle(); }
       else setInterval(loadSafety, 3000);
       // 현재 로봇의 기본 상태 구독 (배터리 표시, 구역 판정용 지도 위치). 플릿 페이지는 직접 모든 로봇을 시작함
       if (!document.body.dataset.fleet) robot.start({ tf: true });

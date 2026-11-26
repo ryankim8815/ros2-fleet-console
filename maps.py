@@ -421,6 +421,29 @@ class Patrol(_Proc):
             return self._start(cmd, {'map': map_name})
 
 
+OBSTACLE_NODE = os.path.join(APP_DIR, 'robot', 'obstacle_node.py')
+
+
+class ObstacleHandler(_Proc):
+    """장애물 처리: obstacle_node.py (워커·경비 모으기 → 소리 → 출구로 밀기 → 소리). 끝나면 스스로 종료."""
+
+    def __init__(self):
+        super().__init__('obstacle.log')
+
+    def start(self, run_id, robots, db_path):
+        import json
+        import sys
+        import tempfile
+        with self.lock:
+            # --ros-args 값은 YAML 로 읽혀 JSON 목록이 문자열이 아니게 되므로 파일로 넘김
+            fd, path = tempfile.mkstemp(prefix=f'obstacle_{run_id}_', suffix='.json')
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(robots, f, ensure_ascii=False)
+            cmd = [sys.executable, OBSTACLE_NODE, '--ros-args', '-p', f'run_id:={run_id}', '-p', f'robots_file:={path}',
+                   '-p', f'db:={db_path}']
+            return self._start(cmd, {'run': run_id, 'robots': [r['id'] for r in robots]})
+
+
 ROUTE_RUNNER = os.path.join(APP_DIR, 'robot', 'route_runner_node.py')
 
 

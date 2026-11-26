@@ -10,7 +10,9 @@
      같은 칸이 연속 persist 번 이상 보이면 '확정', 확정 칸을 이어 붙인 덩어리가 min_area 이상이면 경보
   3) 경보: data/fleet.db 의 alerts·alert_robots 에 기록하고 /fleet/alerts (std_msgs/String JSON) 로 알림
      가까운 곳의 열린 경보가 있으면 새로 만들지 않고 갱신 (다른 로봇이 다시 보면 등급 올림)
+     출구 둘레(obstacle.EXIT_RADIUS)는 '새로 생긴 것'으로 보지 않음 (장애물 처리로 옮겨 둔 것)
   4) 장애물 대기: 경비 중에 '새로 생긴 것' 경보를 새로 만들면 그 자리에 멈추고(goal 취소) 경비 상태를 alarm 으로.
+     활성 지도에 출구가 있으면 서버가 이것을 보고 '장애물 처리' 모드로 바꿈 (obstacle.py). 없으면 아래처럼 관제실을 기다림.
      기다리는 동안 alarm_interval 초마다 알림: TurtleBot3 부저(<ns>/sound, ERROR), Pinky LED 빨강 깜빡임·표정 angry
      (pinky_interfaces 가 있을 때). 관제 웹은 alarm 상태를 보고 경고음을 냄.
      관제실이 그 경보를 처리(이상 없음·오탐·기준 지도 반영)하면 스스로 다시 경비, 또는 웹에서 '재개'.
@@ -51,6 +53,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
 import coverage  # noqa: E402
 import dbutil  # noqa: E402
 import maps  # noqa: E402
+import obstacle  # noqa: E402
 import patrol_store as store  # noqa: E402
 import roles  # noqa: E402
 
@@ -173,8 +176,11 @@ class RobotWatch:
         with np.errstate(invalid='ignore', divide='ignore'):
             sin_inc = np.abs(np.cos(ang) * ty - np.sin(ang) * tx) / tl
         steep = np.nan_to_num(sin_inc, nan=0.0) > math.sin(math.radians(25))
+        exit_xy = self.p.exit   # 출구 둘레는 '새로 생긴 것'으로 보지 않음 (옮겨 둔 장애물이 다시 경보가 되지 않게)
         for k in np.nonzero(ok | far)[0]:
             if ok[k]:
+                if exit_xy and (ex[k] - exit_xy[0]) ** 2 + (ey[k] - exit_xy[1]) ** 2 < obstacle.EXIT_RADIUS ** 2:
+                    continue
                 i, j = B.cell(ex[k], ey[k])
                 if 0 <= i < B.w and 0 <= j < B.h and B.free[j, i] and not B.near[j, i]:
                     hits_new.add((i, j))
@@ -391,6 +397,8 @@ class PatrolNode(Node):
         self.con = store.db(self.db_path)
         self.db_lock = threading.Lock()
         self.warned = set()
+        self.exit = None              # 활성 지도의 출구 (x, y) — 시작할 때와 5초마다 DB 에서
+        self.load_exit()              # 스캔을 받기 전에 (장애물 처리 직후 다시 켜질 때 옮긴 장애물을 바로 보게 되므로)
         self.load_config()
         self.base = Baseline(self.map_name, self.settings['tol'])
         self.alert_pub = self.create_publisher(String, '/fleet/alerts', 10)
@@ -410,6 +418,15 @@ class PatrolNode(Node):
             self.warned.add(key)
             self.get_logger().warn(msg)
 
+    def load_exit(self):
+        """활성 지도의 출구 (장애물 처리로 옮겨 둔 장애물을 다시 경보로 만들지 않게). 시작할 때와 5초마다"""
+        with self.db_lock:
+            try:
+                e = obstacle.get_exit(self.con, self.map_name)
+                self.exit = (e['x'], e['y']) if e else None
+            except Exception:  # noqa: BLE001  (예전 DB 등)
+                self.exit = None
+
     def load_config(self):
         self.settings = store.read_patrol(self.map_name)['settings']
         p = os.path.join(store.PATROL_DIR, f'{self.map_name}.json')
@@ -420,6 +437,7 @@ class PatrolNode(Node):
             self.con, fresh = dbutil.ensure(self.con, self.db_path, store.MIGRATIONS)
         if fresh:
             self.get_logger().warn('DB 파일(data/fleet.db)이 새로 만들어졌습니다')
+        self.load_exit()
         p = os.path.join(store.PATROL_DIR, f'{self.map_name}.json')
         if os.path.exists(p) and os.path.getmtime(p) != self.cfg_mtime:
             self.load_config()
@@ -564,10 +582,12 @@ class PatrolNode(Node):
         if area < S['min_area'] or len(cells) < 3:
             return
         now = time.time()
-        # 같은 곳(0.5 m) 같은 종류: 열린 경보면 갱신, 최근 30분 안에 처리(이상 없음/오탐)했으면 다시 알리지 않음
+        # 같은 곳(0.5 m) 같은 종류: 열린 경보면 갱신, 최근 30분 안에 처리(이상 없음/오탐)했으면 다시 알리지 않음.
+        # 단, 장애물 처리로 출구에 옮긴 경보는 빼고 봄 (그 자리는 비었으므로 새로 놓인 것은 다시 알려야 함)
         rows = self.con.execute(
             'SELECT * FROM alerts WHERE map = ? AND kind = ? AND ((x - ?)*(x - ?) + (y - ?)*(y - ?)) < 0.25 '
-            "AND (status = 'open' OR handled_at > ?) ORDER BY id DESC LIMIT 1",
+            "AND (status = 'open' OR (handled_at > ? AND id NOT IN "
+            "(SELECT alert_id FROM obstacle_runs WHERE state = 'done' AND alert_id IS NOT NULL))) ORDER BY id DESC LIMIT 1",
             (self.map_name, kind, cx, cx, cy, cy, now - 1800)).fetchall()
         if rows:
             a = rows[0]

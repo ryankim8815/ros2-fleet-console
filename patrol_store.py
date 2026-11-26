@@ -2,7 +2,7 @@
 
 serve.py 와 robot/patrol_node.py(경비 노드)가 함께 씁니다.
 
-  config/mode.json             {"mode": "operate"|"mapping", "since": epoch}
+  config/mode.json             {"mode": "operate"|"mapping"|"obstacle", "since": epoch, "run": 장애물 처리 번호}
                                (예전 "patrol"(플릿 전체 경비) 은 없어짐 → 운영 모드에서 로봇마다 역할(roles.py)로)
   config/patrol/<지도>.json    {"settings": {...}} (예전 파일의 "routes"(수동 순찰 경로)는 읽지 않음)
   data/fleet.db (fleet_db.py)  경보: alerts (한 건), alert_robots (본 로봇마다 한 줄, robots 외래 키 → 로봇별 검색)
@@ -21,7 +21,7 @@ MODE_PATH = os.path.join(CONFIG, 'mode.json')
 PATROL_DIR = os.path.join(CONFIG, 'patrol')
 DB_PATH = fleet_db.DB_PATH
 
-MODES = ('operate', 'mapping')
+MODES = ('operate', 'mapping', 'obstacle')   # obstacle = 장애물 처리 (서버가 자동으로만 바꿈, obstacle.py)
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$')
 ID_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]{0,40}$')
 

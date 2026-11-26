@@ -80,6 +80,14 @@ window.App.ready.then(async (App) => {
       await App.adminJson('/api/mode', { method: 'POST', body: JSON.stringify({ mode: 'operate' }) });
       App.pollMode();
       await poll();
+      // 지도 만들기가 끝나면 출구 지정 (장애물 처리 때 장애물을 옮겨 둘 곳). 활성 지도에 아직 없으면 바로 지정하러
+      const mf = (await (await fetch('/api/fleet', { cache: 'no-store' })).json()).mapFile;   // 방금 저장하며 활성으로 했을 수 있음
+      if (mf) {
+        const ex = (await (await fetch(`/api/maps/${encodeURIComponent(mf)}/exit`, { cache: 'no-store' })).json()).exit;
+        if (!ex && confirm(`활성 지도 '${mf}' 에 출구가 없습니다. 지금 출구를 지정할까요?\n(장애물 처리 때 로봇들이 장애물을 밀어 옮겨 둘 곳입니다)`)) {
+          location.href = `places.html?map=${encodeURIComponent(mf)}&exit=1`;
+        }
+      }
     } catch (e) { toast(`실패: ${e.message}`, 'danger'); }
   });
 
@@ -226,7 +234,8 @@ window.App.ready.then(async (App) => {
       const info = await App.adminJson('/api/mapping/save', { method: 'POST', body: JSON.stringify({ name }) });
       if ($('#make-active').checked) await App.setActiveMap(name);
       $('#saved').innerHTML = `<div class="check"><span class="ok">✓</span><span class="mono">config/maps/${esc(info.name)}.yaml</span><span class="muted">${info.width}×${info.height}</span></div>
-        <div class="muted" style="font-size: 12px; line-height: 1.6">${$('#make-active').checked ? '활성(기준) 지도로 지정했습니다. ' : ''}다음: 끝내기 → 로봇별 Nav2 (<span class="mono">nav2_ns.launch.py map:=${esc(info.name)}</span>) → <a href="roles.html">역할 (워커·경비)</a> / <a href="zones.html?map=${encodeURIComponent(info.name)}">이동 구역</a><br>
+        <a class="btn btn-primary" href="places.html?map=${encodeURIComponent(info.name)}&exit=1" style="text-decoration: none; align-self: flex-start">다음: 출구 지정 →</a>
+        <div class="muted" style="font-size: 12px; line-height: 1.6">${$('#make-active').checked ? '활성(기준) 지도로 지정했습니다. ' : ''}출구는 장애물 처리 때 로봇들이 장애물을 밀어 옮겨 둘 곳입니다. 그다음: 끝내기 → 로봇별 Nav2 (<span class="mono">nav2_ns.launch.py map:=${esc(info.name)}</span>) → <a href="roles.html">역할 (워커·경비)</a> / <a href="zones.html?map=${encodeURIComponent(info.name)}">이동 구역</a><br>
         로봇마다 AMCL 초기 위치는 이번 시작 자세 + 지금까지 움직인 만큼입니다 (플릿 화면에서 초기 위치를 다시 찍어도 됨).</div>`;
       toast(`지도 ${name} 를 저장했습니다`, 'ok');
     } catch (e) { toast(`저장 실패: ${e.message}`, 'danger', 6000); }

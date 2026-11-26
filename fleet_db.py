@@ -1,6 +1,6 @@
 """관제센터 DB 하나 (SQLite, data/fleet.db): 스키마와 연결.
 
-테이블 (스키마 버전 2, PRAGMA user_version)
+테이블 (스키마 버전 3, PRAGMA user_version)
   참조     maps               지도 이름 (config/maps 를 서버 시작·지도 저장 때 등록)
            robots             로봇 (config/fleet.json 과 동기화, 목록에서 빠지면 active = 0, 지우지 않음)
   지점·경로 places             지점: 지도별, 이름은 지도 안에서 겹치지 않음
@@ -15,6 +15,8 @@
            robot_safety       로봇별 덮어쓰기 (줄이 없는 로봇은 기본값) (v2)
   역할     robot_roles        로봇 역할 worker(이동 경로 반복) | guard(자율 경비) + 경비 상태·대기 중인 경보 (v2)
            safety_changes     안전 구역을 바꿀 때마다 한 줄 (시각, 값, 바꾼 화면) (v2)
+  장애물   map_exits          지도마다 출구 위치 (장애물을 옮겨 둘 곳) (v3)
+           obstacle_runs      장애물 처리 한 번마다 한 줄: 단계·진행·계획(밀 길, 로봇 자리)·끝나고 다시 시작할 역할 (v3)
 
 읽고 쓰는 함수는 places.py(지점·경로·할당), patrol_store.py(경보), safety.py(LiDAR 안전 구역)에 있습니다.
 파일은 저장소에 없고 서버를 켤 때 없으면 만듭니다 (dbutil.connect). 스키마를 바꿀 때는 MIGRATIONS 끝에 함수를 더합니다.
@@ -158,6 +160,8 @@ SAFETY_MIN_GAP = 0.05   # 서행 거리 ≥ 정지 거리 + 이 값 (m)
 ROLES = ('worker', 'guard')
 # 경비 상태: stopped 안 함 · running 경비 중 · paused 멈춤(사용자·비상정지·모드 변경·서버 재시작) · alarm 장애물 앞 대기
 GUARD_STATES = ('stopped', 'running', 'paused', 'alarm')
+# 장애물 처리 단계: 모이기 → 소리(5초) → 밀기 → 소리(5초) → 끝 | 실패 | 중단
+OBSTACLE_STATES = ('gathering', 'signal1', 'pushing', 'signal2', 'done', 'failed', 'aborted')
 
 
 def _v2(con):
@@ -211,7 +215,35 @@ CREATE TABLE robot_roles (
                 'VALUES (1, ?, ?, ?, ?, 0)', (int(d['enabled']), d['stop_dist'], d['slow_dist'], d['slow_speed']))
 
 
-MIGRATIONS = [_v1, _v2]
+def _v3(con):
+    """장애물 처리: 지도마다 출구(map_exits) + 처리 한 번마다 한 줄(obstacle_runs)"""
+    dbutil.script(con, f'''
+CREATE TABLE map_exits (
+  map TEXT PRIMARY KEY REFERENCES maps(name) ON UPDATE CASCADE,   -- 지도마다 출구 하나 (장애물을 옮겨 둘 곳)
+  x REAL NOT NULL CHECK (abs(x) <= {MAX_COORD}),
+  y REAL NOT NULL CHECK (abs(y) <= {MAX_COORD}),
+  updated_at REAL NOT NULL
+);
+CREATE TABLE obstacle_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alert_id INTEGER REFERENCES alerts(id) ON DELETE SET NULL,      -- 처리한 경보 (새로 생긴 장애물)
+  map TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN {OBSTACLE_STATES}),
+  progress REAL NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 1),   -- 미는 중: 출구까지 간 비율
+  message TEXT NOT NULL DEFAULT '' CHECK (length(message) <= 300),
+  obstacle TEXT NOT NULL,      -- JSON {{x, y, r}}: 처음 본 장애물 (지도 좌표, 반지름 추정)
+  exit TEXT NOT NULL,          -- JSON {{x, y}}
+  plan TEXT NOT NULL DEFAULT '{{}}',   -- JSON {{path, robots: {{id: {{slot, row, state}}}}, est}}
+  resume TEXT NOT NULL DEFAULT '{{}}', -- JSON {{routes: [로봇 id], guards: [로봇 id]}}: 끝나면 다시 시작할 역할
+  started_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  finished_at REAL
+);
+CREATE INDEX obstacle_runs_alert ON obstacle_runs(alert_id);
+''')
+
+
+MIGRATIONS = [_v1, _v2, _v3]
 
 
 def db(path=DB_PATH):

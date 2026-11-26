@@ -15,6 +15,7 @@ window.App.ready.then(async (App) => {
   let selected = null;           // 선택한 지점 id
   let pick = null;               // null | {kind: 'new'} | {kind: 'move', id}
   let draft = null;              // 새 지점 미리보기 {x, y, yaw}
+  let exitPt = null;             // 이 지도의 출구 {x, y} (장애물 처리 때 장애물을 옮겨 둘 곳)
 
   const deg = (rad) => Math.round((rad * 180) / Math.PI);
   const rad = (d) => (Number(d) * Math.PI) / 180;
@@ -54,8 +55,38 @@ window.App.ready.then(async (App) => {
     $('#active-badge').className = `badge ${isActive ? 'ok' : 'warn'}`;
     view.state.zones = isActive ? (App.zones.zones || []).map((z) => ({ ...z, dim: true })) : [];
     selected = null;
+    await loadExit();
     await loadPlaces();
   }
+
+  // ---------- 출구 (지도마다 하나, 장애물 처리 때 로봇들이 장애물을 밀어 옮겨 둘 곳) ----------
+  async function loadExit() {
+    exitPt = null;
+    try { exitPt = (await (await fetch(`/api/maps/${encodeURIComponent(current.name)}/exit`, { cache: 'no-store' })).json()).exit; } catch (e) { /* 없음 */ }
+    view.state.exit = exitPt ? { x: exitPt.x, y: exitPt.y, radius: 1.0 } : null;
+    $('#exit-clear').classList.toggle('hidden', !exitPt);
+    $('#exit-btn').lastChild.textContent = exitPt ? '출구 다시 지정' : '출구 지정';
+    const note = $('#exit-note');
+    note.innerHTML = exitPt
+      ? `<b>출구</b><span class="muted">(${exitPt.x.toFixed(2)}, ${exitPt.y.toFixed(2)}) · 운영 중 경비가 지도에 없던 장애물을 찾으면 워커·경비가 모여 이곳으로 밀어 옮깁니다. 출구 둘레 1 m 는 경비가 장애물로 보지 않습니다.</span>`
+      : '<b>출구가 없습니다.</b><span class="muted">출구를 지정해야 장애물 처리 모드가 동작합니다 (없으면 경비가 장애물 앞에서 관제실을 기다림). <b>출구 지정</b>을 누르고 지도의 빈 곳을 클릭하세요.</span>';
+    note.classList.remove('hidden');
+    view.invalidate();
+  }
+  async function saveExit(x, y) {
+    try {
+      await api(`/api/maps/${encodeURIComponent(current.name)}/exit`, 'PUT', { x: round(x), y: round(y) });
+      toast(`출구를 (${x.toFixed(2)}, ${y.toFixed(2)}) 에 지정했습니다`, 'ok');
+      if (new URLSearchParams(location.search).get('exit')) history.replaceState(null, '', `?map=${encodeURIComponent(current.name)}`);
+    } catch (e) { toast(`출구를 저장하지 못했습니다: ${e.message}`, 'danger', 6000); }
+    await loadExit();
+  }
+  $('#exit-btn').addEventListener('click', () => (pick && pick.kind === 'exit' ? stopPick() : startPick({ kind: 'exit' })));
+  $('#exit-clear').addEventListener('click', async () => {
+    if (!confirm('출구를 지울까요? 출구가 없으면 장애물 처리 모드가 동작하지 않습니다.')) return;
+    try { await api(`/api/maps/${encodeURIComponent(current.name)}/exit`, 'DELETE'); toast('출구를 지웠습니다', 'warn'); } catch (e) { toast(`실패: ${e.message}`, 'danger'); }
+    await loadExit();
+  });
 
   async function loadPlaces() {
     const r = await fetch(`/api/places?map=${encodeURIComponent(current.name)}`, { cache: 'no-store' });
@@ -72,22 +103,25 @@ window.App.ready.then(async (App) => {
     pick = p;
     view.goalMode = true;
     const target = p.kind === 'move' ? places.find((x) => x.id === p.id) : null;
-    $('#pick-hint').textContent = target
-      ? `"${target.name}" 의 새 위치를 클릭 (끌면 방향) · Esc 취소`
-      : '지점을 둘 곳을 클릭 (끌면 도착 방향) · Esc 취소';
+    $('#pick-hint').textContent = p.kind === 'exit' ? '출구를 둘 곳(지도의 빈 곳)을 클릭 · Esc 취소'
+      : target ? `"${target.name}" 의 새 위치를 클릭 (끌면 방향) · Esc 취소`
+        : '지점을 둘 곳을 클릭 (끌면 도착 방향) · Esc 취소';
     $('#pick-hint').classList.remove('hidden');
     $('#add-btn').setAttribute('aria-pressed', String(p.kind === 'new'));
+    $('#exit-btn').setAttribute('aria-pressed', String(p.kind === 'exit'));
   }
   function stopPick() {
     pick = null;
     view.goalMode = false;
     $('#pick-hint').classList.add('hidden');
     $('#add-btn').setAttribute('aria-pressed', 'false');
+    $('#exit-btn').setAttribute('aria-pressed', 'false');
   }
   view.onGoal = async (x, y, th) => {
     const p = pick;
     stopPick();
     if (!p) return;
+    if (p.kind === 'exit') { await saveExit(x, y); return; }
     if (p.kind === 'new') { openNew(x, y, th); return; }
     const pl = places.find((q) => q.id === p.id);
     if (pl) await savePlace(pl, { x: round(x), y: round(y), yaw: th });
@@ -259,4 +293,6 @@ window.App.ready.then(async (App) => {
   }, 300);
 
   await loadMaps();
+  // 지도 만들기를 끝내고 넘어온 경우(?exit=1): 바로 출구 찍기
+  if (new URLSearchParams(location.search).get('exit') && current) startPick({ kind: 'exit' });
 });

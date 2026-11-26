@@ -279,6 +279,46 @@
         }
       }
 
+      // 출구: {x, y, radius} — 초록 깃발 + 경비가 '새로 생긴 것'으로 보지 않는 둘레(점선 원)
+      if (st.exit && this.layers.exit !== false) {
+        const [ex, ey] = this.toScreen(st.exit.x, st.exit.y);
+        if (st.exit.radius) {
+          ctx.beginPath(); ctx.arc(ex, ey, st.exit.radius * this.scale, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(74,222,128,0.5)'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 5]); ctx.stroke(); ctx.setLineDash([]);
+        }
+        ctx.strokeStyle = '#4ADE80'; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex, ey - 26); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex, ey - 26); ctx.lineTo(ex + 16, ey - 21); ctx.lineTo(ex, ey - 16); ctx.closePath();
+        ctx.fillStyle = '#4ADE80'; ctx.fill();
+        ctx.beginPath(); ctx.arc(ex, ey, 3.5, 0, Math.PI * 2); ctx.fill();
+        ctx.font = '700 12px Inter, "Noto Sans KR", sans-serif'; ctx.fillText('출구', ex + 6, ey + 14);
+      }
+      // 장애물 처리: {x, y, r, path, slots: [{x, y, th, color, row}], est: {x, y}} — 장애물, 출구까지 밀 길, 로봇 자리
+      if (st.obstacle) {
+        const o = st.obstacle;
+        if (o.path && o.path.length > 1) line(o.path, '#FB923C', 3, [10, 6]);
+        (o.slots || []).forEach((s) => {
+          const [sx, sy] = this.toScreen(s.x, s.y);
+          ctx.beginPath(); ctx.arc(sx, sy, Math.max(6, (s.radius || 0.1) * this.scale), 0, Math.PI * 2);
+          ctx.strokeStyle = s.color || '#E6EDF3'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+          const [tx, ty] = this.toScreen(s.x + Math.cos(s.th) * 0.2, s.y + Math.sin(s.th) * 0.2);
+          ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+        });
+        const drawOb = (x, y, alpha) => {
+          const [ox, oy] = this.toScreen(x, y);
+          ctx.globalAlpha = alpha;
+          ctx.beginPath(); ctx.arc(ox, oy, Math.max(7, o.r * this.scale), 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(248,113,113,0.35)'; ctx.fill(); ctx.strokeStyle = '#F87171'; ctx.lineWidth = 2; ctx.stroke();
+          ctx.globalAlpha = 1;
+        };
+        const moved = o.est && Math.hypot(o.est.x - o.x, o.est.y - o.y) > 0.05;
+        drawOb(o.x, o.y, moved ? 0.35 : 1);            // 처음 본 곳
+        if (moved) drawOb(o.est.x, o.est.y, 1);         // 지금 추정 위치
+        const [lx, ly] = this.toScreen(moved ? o.est.x : o.x, moved ? o.est.y : o.y);
+        ctx.fillStyle = '#FCA5A5'; ctx.font = '700 12px Inter, "Noto Sans KR", sans-serif';
+        ctx.fillText(o.label || '장애물', lx + Math.max(7, o.r * this.scale) + 4, ly - 4);
+      }
+
       // 이름 붙인 지점: [{x, y, yaw, name, selected, dim}] — 핀 + 방향 + 이름
       if (st.places && st.places.length && this.layers.places !== false) {
         ctx.font = '600 12px Inter, "Noto Sans KR", sans-serif';
