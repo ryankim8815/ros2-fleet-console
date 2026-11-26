@@ -147,6 +147,10 @@ window.App.ready.then((App) => {
         return;
       }
     } catch (e) { toast(`액션 서버 확인 실패: ${e.message}`, 'warn'); return; }
+    // Nav2 주행 쪽이 꺼져 있으면 다시 켬 (초기 위치를 늦게 준 경우)
+    const navSt = await R.ensureNavActive();
+    if (navSt === 'restarted') toast('Nav2 주행이 꺼져 있어 다시 켰습니다', 'ok', 3000);
+    if (navSt === 'failed') { toast('Nav2 주행을 켜지 못했습니다. 플릿 화면의 [초기 위치]로 지도 위 위치를 먼저 알려 주세요', 'warn', 7000); return; }
     if (goal) goal.cancel();
     st.goal = { x, y, th };
     view.invalidate();

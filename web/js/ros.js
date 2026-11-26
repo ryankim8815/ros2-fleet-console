@@ -182,7 +182,9 @@
         const id = this.nextId('srv');
         const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`시간 초과: ${service}`)); }, timeout);
         this.pending.set(id, { resolve, reject, timer });
-        const msg = { op: 'call_service', id, service, args };
+        // timeout(초)도 rosbridge 에 넘김: rosbridge 기본은 5초라, 오래 걸리는 서비스(Nav2 STARTUP 등)를
+        // 브라우저가 기다리는 동안 rosbridge 가 먼저 실패로 끝내 버리지 않게
+        const msg = { op: 'call_service', id, service, args, timeout: timeout / 1000 };
         if (type) msg.type = type;
         this.send(msg);
       });

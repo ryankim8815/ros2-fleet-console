@@ -120,7 +120,7 @@ class RobotRun:
                 return
             if not h.accepted:
                 self.goal = None
-                self.p.finish(self, job, 'failed', 'Nav2 가 goal 을 거부했습니다')
+                self.p.finish(self, job, 'failed', 'Nav2 가 goal 을 거부했습니다 (Nav2 주행이 꺼져 있을 수 있음: 플릿 화면에서 [초기 위치]를 찍으면 다시 켜짐)')
                 return
             self.goal = h
 

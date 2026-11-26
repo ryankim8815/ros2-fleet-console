@@ -187,6 +187,7 @@ window.App.ready.then((App) => {
       const s = await ros.callService('/rosapi/action_servers', {});
       if (!(s.action_servers || []).includes(action)) { toast(`${r.name}: ${action} 액션 서버가 없습니다 (Nav2 미실행)`, 'warn', 5000); return; }
     } catch (e) { toast(`액션 서버 확인 실패: ${e.message}`, 'warn'); return; }
+    if (!(await navReady(r))) return;
     const xr = extra.get(r.id);
     if (xr.nav && xr.nav.g) xr.nav.g.cancel();
     xr.goal = { x, y, th };
@@ -202,13 +203,27 @@ window.App.ready.then((App) => {
     nav.g = null;
     if (xr.nav === nav) xr.goal = null;
   }
-  view.onGoal = (x, y, th) => {
+  // Nav2 주행 쪽이 꺼져 있으면(초기 위치를 늦게 줘서 켜다가 포기한 경우 등) 다시 켬. 못 켜면 false
+  async function navReady(r) {
+    const st = await r.ensureNavActive();
+    if (st === 'restarted') { event(r, 'INFO', 'Nav2 주행이 꺼져 있어 다시 켰습니다'); toast(`${r.name}: Nav2 주행을 다시 켰습니다`, 'ok', 3000); }
+    if (st === 'failed') {
+      event(r, 'WARN', 'Nav2 주행을 켜지 못했습니다 (지도 위 위치 없음)');
+      toast(`${r.name}: Nav2 주행을 켜지 못했습니다. [초기 위치]로 지도 위 위치를 먼저 알려 주세요`, 'warn', 7000);
+      return false;
+    }
+    return true;   // active | absent (lifecycle manager 가 없는 구성은 그대로 시도)
+  }
+  view.onGoal = async (x, y, th) => {
     const mode = clickMode;
     setGoalMode(null);
     if (mode === 'init') {
-      sel.setInitialPose(x, y, th);
-      event(sel, 'INFO', `초기 위치 (${x.toFixed(2)}, ${y.toFixed(2)}, ${(th * 180 / Math.PI).toFixed(0)}°) → ${sel.topic('initialpose')}`);
-      toast(`${sel.name}: 초기 위치를 보냈습니다`, 'ok', 2000);
+      const r = sel;
+      r.setInitialPose(x, y, th);
+      event(r, 'INFO', `초기 위치 (${x.toFixed(2)}, ${y.toFixed(2)}, ${(th * 180 / Math.PI).toFixed(0)}°) → ${r.topic('initialpose')}`);
+      toast(`${r.name}: 초기 위치를 보냈습니다`, 'ok', 2000);
+      await new Promise((res) => setTimeout(res, 1500));   // AMCL 이 map TF 를 내기까지
+      await navReady(r);
     } else sendGoal(sel, x, y, th);
   };
 

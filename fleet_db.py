@@ -1,6 +1,6 @@
 """관제센터 DB 하나 (SQLite, data/fleet.db): 스키마와 연결.
 
-테이블 (스키마 버전 1, PRAGMA user_version)
+테이블 (스키마 버전 2, PRAGMA user_version)
   참조     maps               지도 이름 (config/maps 를 서버 시작·지도 저장 때 등록)
            robots             로봇 (config/fleet.json 과 동기화, 목록에서 빠지면 active = 0, 지우지 않음)
   지점·경로 places             지점: 지도별, 이름은 지도 안에서 겹치지 않음
@@ -11,8 +11,11 @@
            route_run_events   실행 중 일어난 일 (시작·멈춤·이어서·바퀴 완료·실패·경로 수정 …)
   경비     alerts             경보 한 건 (위치·크기·등급·처리 상태·발견 당시 스캔)
            alert_robots       경보를 본 로봇마다 한 줄 (처음·마지막 본 시각, 횟수)
+  안전     safety_settings    LiDAR 안전 구역 플릿 기본값 (켜짐, 정지·서행 거리, 서행 속도). 한 줄 (v2)
+           robot_safety       로봇별 덮어쓰기 (줄이 없는 로봇은 기본값) (v2)
+           safety_changes     안전 구역을 바꿀 때마다 한 줄 (시각, 값, 바꾼 화면) (v2)
 
-읽고 쓰는 함수는 places.py(지점·경로·할당)와 patrol_store.py(경보)에 있고, 둘 다 이 파일의 db() 로 엽니다.
+읽고 쓰는 함수는 places.py(지점·경로·할당), patrol_store.py(경보), safety.py(LiDAR 안전 구역)에 있습니다.
 파일은 저장소에 없고 서버를 켤 때 없으면 만듭니다 (dbutil.connect). 스키마를 바꿀 때는 MIGRATIONS 끝에 함수를 더합니다.
 """
 import os
@@ -145,7 +148,53 @@ CREATE INDEX alert_robots_robot ON alert_robots(robot_id, last_seen);
 ''')
 
 
-MIGRATIONS = [_v1]
+# LiDAR 안전 구역 값 범위 (safety.py 가 같은 값으로 검사하고, DB 도 CHECK 로 막음)
+SAFETY_DEFAULTS = {'enabled': True, 'stop_dist': 0.20, 'slow_dist': 0.50, 'slow_speed': 0.05}
+SAFETY_LIMITS = {'stop_dist': (0.05, 1.0), 'slow_dist': (0.10, 2.0), 'slow_speed': (0.01, 0.22)}
+SAFETY_MIN_GAP = 0.05   # 서행 거리 ≥ 정지 거리 + 이 값 (m)
+
+
+def _v2(con):
+    """LiDAR 안전 구역: 플릿 기본값 한 줄(safety_settings, id = 1) + 로봇별 덮어쓰기(robot_safety)
+    + 바꿀 때마다 한 줄(safety_changes)"""
+    (s0, s1), (l0, l1), (v0, v1) = (SAFETY_LIMITS[k] for k in ('stop_dist', 'slow_dist', 'slow_speed'))
+    cols = f'''
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  stop_dist REAL NOT NULL CHECK (stop_dist BETWEEN {s0} AND {s1}),     -- 이 거리(m) 안 물체 → 정지
+  slow_dist REAL NOT NULL CHECK (slow_dist BETWEEN {l0} AND {l1}),     -- 이 거리(m) 안 물체 → 서행
+  slow_speed REAL NOT NULL CHECK (slow_speed BETWEEN {v0} AND {v1})'''   # 서행 속도 (m/s). 뒤에 ',' 가 붙으므로 SQL 주석 없이
+    gap = f'CHECK (slow_dist - stop_dist >= {SAFETY_MIN_GAP - 1e-6})'   # 표 제약은 열 정의 뒤에
+    dbutil.script(con, f'''
+CREATE TABLE safety_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),   -- 플릿 전체에 한 줄
+{cols},
+  updated_at REAL NOT NULL,
+  {gap}
+);
+CREATE TABLE robot_safety (
+  robot_id TEXT PRIMARY KEY REFERENCES robots(id),   -- 줄이 없는 로봇은 플릿 기본값(safety_settings)을 따름
+{cols},
+  updated_at REAL NOT NULL,
+  {gap}
+);
+CREATE TABLE safety_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  t REAL NOT NULL,
+  robot_id TEXT REFERENCES robots(id),   -- NULL = 플릿 기본값을 바꿈
+  action TEXT NOT NULL DEFAULT 'set' CHECK (action IN ('set', 'clear')),   -- clear = 로봇 덮어쓰기를 지우고 기본값으로
+{cols},                                  -- 바꾼 뒤 그 대상(기본값 또는 로봇)에 적용되는 값
+  by TEXT NOT NULL DEFAULT '' CHECK (length(by) <= 40),  -- 바꾼 화면 (예: 'PC ab12')
+  {gap}
+);
+CREATE INDEX safety_changes_t ON safety_changes(t);
+CREATE INDEX safety_changes_robot ON safety_changes(robot_id, t);
+''')
+    d = SAFETY_DEFAULTS
+    con.execute('INSERT INTO safety_settings (id, enabled, stop_dist, slow_dist, slow_speed, updated_at) '
+                'VALUES (1, ?, ?, ?, ?, 0)', (int(d['enabled']), d['stop_dist'], d['slow_dist'], d['slow_speed']))
+
+
+MIGRATIONS = [_v1, _v2]
 
 
 def db(path=DB_PATH):

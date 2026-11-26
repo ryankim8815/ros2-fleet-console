@@ -291,9 +291,84 @@
       return false;
     }
 
+    // ---- LiDAR 안전 구역 (웹 수동 조종) ----
+    // this.safety = {enabled, stop_dist, slow_dist, slow_speed} (common.js 가 /api/safety 로 채움, safety.py)
+    // 로봇 중심(base_footprint)에서 진행 방향 쪽(전진이면 앞쪽 반, 후진이면 뒤쪽 반) 가장 가까운 물체까지 거리로:
+    //   stop_dist 안 → 직진 0 (반대쪽으로 빠져나가기·제자리 회전은 허용), slow_dist 안 → 직진 속도를 slow_speed 로 제한
+    // 스캔이 1초 넘게 없으면 서행으로 제한 (모르면 안전 쪽). Nav2 쪽은 collision_monitor 가 같은 값으로 따로 막음.
+    watchSafetyScan() {
+      if (this._safetyUnsub) return;
+      this._safetyMem = [];        // 빛줄기별 마지막 유효 거리 {r, t}
+      this._safetySince = performance.now();
+      this._safetyUnsub = this.ros.subscribe(this.topic('scan'), 'sensor_msgs/msg/LaserScan', (m) => this.onSafetyScan(m));
+      this.unsubs.push(() => { this._safetyUnsub(); this._safetyUnsub = null; });
+    }
+
+    onSafetyScan(m) {
+      const off = this.sensorOffset(m.header.frame_id);
+      const now = performance.now();
+      const mem = this._safetyMem;
+      const slow = (this.safety && this.safety.slow_dist) || 0.5;
+      let front = Infinity, back = Infinity;
+      const ranges = m.ranges || [];
+      const pose = this.pose ? { ...this.pose } : null;
+      // 기억한 뒤로 로봇이 3 cm 또는 10° 넘게 움직였으면 그 기억은 버림 (odom 이 없으면 3초)
+      const stale = (e) => (e.pose && pose
+        ? Math.hypot(pose.x - e.pose.x, pose.y - e.pose.y) > 0.03 || Math.abs(Math.atan2(Math.sin(pose.th - e.pose.th), Math.cos(pose.th - e.pose.th))) > 0.17
+        : now - e.t > 3000);
+      for (let i = 0; i < ranges.length; i += 1) {
+        let r = ranges[i];
+        let hidden = false;
+        if (r !== null && Number.isFinite(r) && r >= m.range_min && r <= m.range_max) mem[i] = { r, t: now, pose };
+        else {
+          // LiDAR 최소 거리(LDS-02 0.16 m 등)보다 가까워지면 값이 사라짐 → 같은 빛줄기에 가까운 물체가 있었고 그 뒤로
+          // 로봇이 움직이지 않았으면 아직 거기 있는 것으로 보고 최소 거리에 둠 (물체가 안 보이게 되어 정지가 풀리는 것 방지).
+          // 물체를 치웠는데 정지가 남으면, 허용되는 반대 방향·회전으로 조금 움직이면 풀림
+          const e = mem[i];
+          if (!e || e.r > slow || stale(e)) continue;
+          r = m.range_min; hidden = true;
+        }
+        const a = m.angle_min + i * m.angle_increment;
+        const [x, y] = Pose2.apply(off, r * Math.cos(a), r * Math.sin(a));
+        // 안 보이게 된 물체는 LiDAR 가 잴 수 없을 만큼 가까운 것 → 거리 0 (그쪽 방향 정지)
+        const d = hidden ? 0 : Math.hypot(x, y);
+        if (x >= 0) front = Math.min(front, d); else back = Math.min(back, d);
+      }
+      this.safetyNear = { front, back, t: now };
+    }
+
+    // 반환 {lin, ang, state: 'off' | 'clear' | 'slow' | 'stop' | 'noscan', d}
+    safetyGate(lin, ang) {
+      const s = this.safety;
+      if (!s || !s.enabled || (!lin && !ang)) return { lin, ang, state: 'off' };
+      this.watchSafetyScan();
+      const clampLin = (v) => Math.max(-s.slow_speed, Math.min(s.slow_speed, v));
+      const n = this.safetyNear;
+      if (!n || performance.now() - n.t > 1000) return { lin: clampLin(lin), ang, state: 'noscan' };
+      if (!lin) return { lin, ang, state: 'clear' };                    // 제자리 회전은 허용 (빠져나갈 방향 잡기)
+      const d = lin > 0 ? n.front : n.back;
+      if (d < s.stop_dist) return { lin: 0, ang, state: 'stop', d };
+      if (d < s.slow_dist && Math.abs(lin) > s.slow_speed) return { lin: clampLin(lin), ang, state: 'slow', d };
+      return { lin, ang, state: d < s.slow_dist ? 'slow' : 'clear', d };
+    }
+
     cmdVel(lin, ang) {
       lin = Math.max(-this.limits.lin, Math.min(this.limits.lin, lin || 0));
       ang = Math.max(-this.limits.ang, Math.min(this.limits.ang, ang || 0));
+      const g = this.safetyGate(lin, ang);
+      if (g.state !== 'off') {
+        ({ lin, ang } = g);
+        this.safetyState = g;
+        // 상태가 바뀔 때, 같은 상태는 3초에 한 번만 알림 (정지·서행·스캔 없음)
+        const now = performance.now();
+        // 막 구독을 시작해 첫 스캔을 기다리는 동안(1.5초)의 '스캔 없음'은 알리지 않음 (서행 제한은 그대로)
+        const warming = g.state === 'noscan' && now - (this._safetySince || 0) < 1500;
+        if (g.state !== 'clear' && !warming && (g.state !== this._lastSafetyEv || now - (this._lastSafetyEvT || 0) > 3000)) {
+          this._lastSafetyEv = g.state; this._lastSafetyEvT = now;
+          document.dispatchEvent(new CustomEvent('tb3:safety-limit', { detail: { robot: this, ...g } }));
+        }
+        if (g.state === 'clear') this._lastSafetyEv = 'clear';
+      }
       if (this.zoneBlocks(lin, ang)) {
         lin = 0; ang = 0;
         const now = performance.now();
@@ -343,6 +418,28 @@
     }
 
     // ---- Nav2 ----
+    // Nav2 주행 쪽(planner·controller·bt_navigator, lifecycle_manager_navigation)이 켜져 있는지 확인하고, 꺼져 있으면 다시 켬.
+    // Nav2 는 실행 후 일정 시간(기본 60초) 안에 map → base_link TF 가 없으면 주행 쪽을 켜다가 포기하는데,
+    // 이 TF 는 AMCL 초기 위치를 준 뒤에야 생깁니다. 그래서 초기 위치를 늦게 주면 목표를 보낼 수 없던 문제를
+    // 초기 위치 직후·목표 전에 RESET → STARTUP 으로 다시 켜서 풉니다 (위치 추정 AMCL 은 따로 관리되어 그대로).
+    // 반환: 'active' (이미 켜짐) | 'restarted' (다시 켬) | 'failed' | 'absent' (Nav2 lifecycle manager 없음)
+    async ensureNavActive() {
+      const base = this.topic('lifecycle_manager_navigation');
+      const isActive = async () => !!(await this.ros.callService(`${base}/is_active`, {}, { type: 'std_srvs/srv/Trigger', timeout: 5000 })).success;
+      try { if (await isActive()) return 'active'; } catch (e) { return 'absent'; }
+      if (this._navStarting) return this._navStarting;
+      const manage = (command, timeout) => this.ros.callService(`${base}/manage_nodes`, { command },
+        { type: 'nav2_msgs/srv/ManageLifecycleNodes', timeout });
+      this._navStarting = (async () => {
+        try {
+          await manage(3, 60000);                 // RESET: 반쯤 켜진 노드들을 처음 상태로
+          const r = await manage(0, 120000);      // STARTUP: configure → activate (map TF 를 기다림)
+          return r && r.success && await isActive() ? 'restarted' : 'failed';
+        } catch (e) { return 'failed'; } finally { this._navStarting = null; }
+      })();
+      return this._navStarting;
+    }
+
     navGoal(x, y, th, frame = 'map', onFeedback) {
       return this.ros.sendActionGoal(this.topic('navigate_to_pose'), 'nav2_msgs/action/NavigateToPose', {
         pose: { header: { frame_id: frame, stamp: { sec: 0, nanosec: 0 } }, pose: { position: { x, y, z: 0 }, orientation: P2().quat(th) } },

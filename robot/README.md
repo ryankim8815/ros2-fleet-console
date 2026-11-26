@@ -359,13 +359,14 @@ Jazzy `nav2_bringup` 은 네임스페이스 모드에서 Nav2 노드의 `/tf` �
 
 ### 7-2. `nav2_ns.launch.py` 가 파라미터를 고치는 내용
 
-기본 파라미터는 `turtlebot3_navigation2/param/burger.yaml` 이고, 실행할 때 로봇에 맞게 복사본을 만듭니다.
+기본 파라미터는 로봇 종류별로 `config/nav2/burger.yaml`(TurtleBot3)·`config/nav2/pinky.yaml`(Pinky Pro) 이고, 실행할 때 로봇에 맞게 복사본을 만듭니다. 종류는 `config/fleet.json` 에서 네임스페이스로 찾습니다 (`robot_type:=auto`).
+pinky.yaml 은 burger.yaml 에서 `robot_radius` 0.1 → 0.08 m, 제어기 최대 속도 0.3 → 0.2 m/s, velocity_smoother ±0.5 → ±0.2 m/s · ±2.5 → ±2.0 rad/s 만 바꿨습니다 (Pinky 크기는 추정값이라 실물로 확인 필요).
 
 | 항목 | 원래 값 | TurtleBot3 (`frame_prefix:=tb3_01/`) | Pinky (`frame_prefix` 없음) |
 | --- | --- | --- | --- |
 | 프레임 (`*_frame`, `*_frame_id`) | `odom`, `base_link`, `base_footprint` | `tb3_01/odom`, `tb3_01/base_link` … | 그대로 |
 | 절대 토픽 (`*topic*`) | `/scan`, `/local_costmap/published_footprint` | `scan` 처럼 상대 이름 → `/tb3_01/scan` | 같음 |
-| `enable_stamped_cmd_vel` | `true` | `true` (TwistStamped) | **`false`** (Pinky 는 Twist 구독, `stamped:=false`) |
+| `enable_stamped_cmd_vel` | `true` | `true` (TwistStamped) | **`false`** (Pinky 는 Twist 구독, `stamped:=auto` 가 종류로 정함) |
 
 ### 7-3. 실행 순서
 
@@ -380,17 +381,18 @@ pixi run web
 
 # 3) PC: 로봇마다 Nav2 (같은 지도, 이름 lab = config/maps/lab.yaml)
 pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=tb3_01 frame_prefix:=tb3_01/ map:=lab
-pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky_01 stamped:=false map:=lab
+pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky_01 map:=lab
 ```
 
 | 인자 | 기본값 | 설명 |
 | --- | --- | --- |
 | `namespace` | (필수) | 로봇 네임스페이스 (`tb3_01`) |
 | `frame_prefix` | `''` | TF 프레임 접두사. TurtleBot3 는 `tb3_01/`, Pinky 는 비움 |
-| `stamped` | `true` | cmd_vel TwistStamped 여부. Pinky 는 `false` |
+| `robot_type` | `auto` | `turtlebot3` \| `pinky`. `auto` 면 `config/fleet.json` 에서 네임스페이스로 찾음 (없으면 `turtlebot3`) |
+| `stamped` | `auto` | cmd_vel TwistStamped 여부. `auto` 면 TurtleBot3 `true`, Pinky `false`. `true`/`false` 로 직접 정할 수도 있음 |
 | `map` | (필수) | 지도 이름(`config/maps/<이름>.yaml`) 또는 yaml 경로 |
 | `keepout` | `auto` | 이동 구역 마스크. `auto` 면 `config/masks/<지도>/<ns>.yaml` 이 있을 때 keepout 필터를 켬, `off` 로 끔, 또는 yaml 경로 |
-| `params_file` | `config/nav2/burger.yaml` | 다른 Nav2 파라미터를 쓰려면 지정 (같은 방식으로 고쳐짐) |
+| `params_file` | `auto` | `auto` 면 종류별 `config/nav2/burger.yaml` \| `pinky.yaml`. 다른 Nav2 파라미터를 쓰려면 경로 지정 (같은 방식으로 고쳐짐) |
 
 4) 웹 등록:
 - TF 토픽은 TurtleBot3 `/tb3_01/tf`, Pinky `/pinky_01/tf` 입니다.
@@ -400,7 +402,7 @@ pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky
 - 로봇을 고르고 **초기 위치**를 누른 뒤, 지도에서 로봇의 실제 위치를 클릭하고 끌어서 방향을 정합니다(`<ns>/initialpose`). AMCL 이 위치를 잡으면 로봇이 지도에 나타납니다.
 - 그다음 **목표 지정**을 누르고 지도에서 목표를 찍습니다.
 
-Pinky 의 로봇 크기·속도에 맞는 Nav2 파라미터는 아직 따로 만들지 않았습니다 (burger.yaml 을 그대로 씀). 실제 Pinky 에서 `robot_radius`, 최대 속도 등을 맞추는 것을 권합니다.
+Pinky 는 `config/nav2/pinky.yaml` 을 씁니다. 몸체 반지름(0.08 m)은 추정값이고 최대 속도(0.2 m/s)는 웹 조종 제한에 맞춘 값이라, 실제 Pinky 에서 `robot_radius`·최대 속도를 확인해 맞추는 것을 권합니다.
 
 ### 7-4. 지도 만들기
 

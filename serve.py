@@ -26,6 +26,10 @@
 - PUT  /api/assignments/<로봇> {route_id, repeat_count}, DELETE : 할당·해제 (토큰)
 - POST /api/assignments/<로봇>/start|resume : 시작(처음부터)·이어서 (토큰, 운영 모드·활성 지도만)
 - POST /api/assignments/<로봇>/pause|stop, POST /api/assignments/pause-all : 멈춤·정지 (토큰 불필요, 같은 출처만)
+- GET  /api/safety : LiDAR 안전 구역 (safety.py, DB) 플릿 기본값 + 로봇별 적용 값(robots) + 최근 변경 이력(changes)
+- PUT  /api/safety {enabled, stop_dist, slow_dist, slow_speed, by} : 플릿 기본값
+- PUT  /api/safety/robots/<로봇> {...}, DELETE /api/safety/robots/<로봇>?by= : 로봇별 덮어쓰기 저장·지우기(기본값으로)
+       어떤 로봇의 적용 값도 켜기만 바뀌는 요청은 토큰 없이(같은 출처만), 끄기·값 바꾸기는 토큰
 
 데이터는 SQLite 파일 하나(data/fleet.db, 스키마는 fleet_db.py)에 있고, 서버를 켤 때 없으면 만듭니다.
 쓰기 요청은 같은 출처(Origin = Host)만 허용합니다. rosbridge 자체에는 인증이 없으므로
@@ -52,6 +56,7 @@ import fleet_db
 import maps
 import patrol_store as store
 import places
+import safety
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 FLEET_PATH = os.path.join(APP_DIR, 'config', 'fleet.json')
@@ -261,6 +266,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json(200, MAPPING.status())
             if path == '/api/mode':
                 return self._json(200, mode_status())
+            if path == '/api/safety':
+                with DB_LOCK:
+                    con = DB()
+                    return self._json(200, safety.snapshot(con, self._query().get('limit', 10)))
             m = re.match(r'^/api/patrol/([^/]+)$', path)
             if m:
                 return self._json(200, store.read_patrol(m.group(1)))
@@ -427,6 +436,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as e:
             return self._json(400, {'error': str(e)})
 
+    def _safety_write(self, robot_id=None, clear=False):
+        """LiDAR 안전 구역 저장: 플릿 기본값(robot_id 없음) 또는 로봇별 덮어쓰기 저장·지우기(clear).
+        켜기만 하는 요청(안전 쪽)은 토큰 없이, 끄기·거리·속도 바꾸기는 토큰"""
+        if not self._same_origin():
+            return self._json(403, {'error': '다른 출처의 요청은 허용하지 않습니다'})
+        try:
+            body = None if clear else self._body()
+            with DB_LOCK:
+                con = DB()
+                if robot_id is None:
+                    need = safety.fleet_needs_token(con, body)
+                else:
+                    if robot_id not in safety.robot_overrides(con) and clear:
+                        need = False
+                    else:
+                        need = safety.robot_needs_token(con, robot_id, body)
+            if need and not self._authorized():
+                return None
+            with DB_LOCK:
+                con = DB()
+                if robot_id is None:
+                    return self._json(200, safety.write_safety(con, body))
+                if clear:
+                    return self._json(200, safety.clear_robot(con, robot_id, self._query().get('by', '')))
+                return self._json(200, safety.write_robot(con, robot_id, body))
+        except KeyError:
+            return self._json(404, {'error': '등록되지 않은 로봇입니다'})
+        except (ValueError, json.JSONDecodeError) as e:
+            return self._json(400, {'error': str(e)})
+
     def do_DELETE(self):
         path = self.path.split('?')[0]
         m = re.match(r'^/api/places/(\d+)$', path)
@@ -438,6 +477,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         m = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})$', path)
         if m:
             return self._routes_write('unassign', m.group(1))
+        m = re.match(r'^/api/safety/robots/([A-Za-z][A-Za-z0-9_]{0,40})$', path)
+        if m:
+            return self._safety_write(m.group(1), clear=True)
         return self._json(404, {'error': 'not found'})
 
     def do_PUT(self):
@@ -451,6 +493,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         mas = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})$', path)
         if mas:
             return self._routes_write('assign', mas.group(1))
+        if path == '/api/safety':
+            return self._safety_write()
+        msr = re.match(r'^/api/safety/robots/([A-Za-z][A-Za-z0-9_]{0,40})$', path)
+        if msr:
+            return self._safety_write(msr.group(1))
         m = re.match(r'^/api/zones/([^/]+)$', path)
         mp = re.match(r'^/api/patrol/([^/]+)$', path)
         if path != '/api/fleet' and not m and not mp:

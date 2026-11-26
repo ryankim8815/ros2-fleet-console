@@ -169,6 +169,209 @@
   }
   document.addEventListener('tb3:zone-block', (e) => toast(`${e.detail.name}: 이동 금지 구역이라 멈췄습니다`, 'warn', 2500));
 
+  // ---------- LiDAR 안전 구역 (가까운 물체 → 정지·서행). 설정: /api/safety (DB data/fleet.db, safety.py) ----------
+  // 플릿 기본값(safety_settings) + 로봇별 덮어쓰기(robot_safety). 로봇마다 '적용 값' = 덮어쓰기가 있으면 그것, 없으면 기본값.
+  // 웹 수동 조종은 Robot.safetyGate 가 r.safety 로, Nav2 주행은 collision_monitor 의 LidarStop·LidarSlow 가 같은 값으로 막음
+  const SAFETY_KEYS = ['stop_dist', 'slow_dist', 'slow_speed'];
+  let safety = { enabled: true, stop_dist: 0.20, slow_dist: 0.50, slow_speed: 0.05, since: 0 };   // 플릿 기본값
+  let safetyRobots = {};           // robot id -> 적용 값 {enabled, stop_dist, slow_dist, slow_speed, source: 'robot'|'fleet'}
+  let safetyChanges = [];          // 최근 변경 이력 (DB safety_changes)
+  const cm = (s) => `${(s * 100).toFixed(0)} cm`;
+  const sameVals = (a, b) => a.enabled === b.enabled && SAFETY_KEYS.every((k) => Math.abs(a[k] - b[k]) < 1e-6);
+  const effOf = (r) => safetyRobots[r.id] || { ...safety, source: 'fleet' };
+  function setSafety(snap) {
+    const { changes, robots: per, ...fleetVals } = snap;
+    safety = fleetVals;
+    if (per) safetyRobots = per;
+    if (changes) safetyChanges = changes;
+    robots.forEach((r) => { r.safety = effOf(r); });
+    renderSafety();
+  }
+  async function loadSafety() {
+    try {
+      const r = await fetch('/api/safety', { cache: 'no-store' });
+      if (r.ok) setSafety(await r.json());
+    } catch (e) { /* serve.py 없이 열었을 때: 기본값(켜짐)으로 */ }
+  }
+  function renderSafety() {
+    const c = $('#safety-chip');
+    if (!c) return;
+    const short = !!c.closest('.m-head');   // 휴대폰 상단은 좁아서 짧게
+    const effs = robots.map(effOf);
+    const nOff = effs.filter((e) => !e.enabled).length;
+    const nOwn = effs.filter((e) => e.source === 'robot').length;
+    const vals = (e) => (e.enabled ? `${cm(e.stop_dist)} 정지 / ${cm(e.slow_dist)} 서행` : '꺼짐');
+    if (!document.body.dataset.fleet && robot) {
+      // 한 로봇 화면(대시보드·모바일): 이 로봇에 적용되는 값
+      const e = effOf(robot);
+      c.textContent = short ? `LiDAR · ${e.enabled ? '켜짐' : '꺼짐'}` : `LiDAR 안전 · ${vals(e)}${e.source === 'robot' ? ' (로봇별)' : ''}`;
+      c.dataset.on = e.enabled ? '1' : '0';
+      c.title = `${robot.name}: ${e.enabled ? `로봇 중심에서 ${cm(e.stop_dist)} 안 물체 → 정지, ${cm(e.slow_dist)} 안 → ${e.slow_speed} m/s 서행` : 'LiDAR 안전 구역 꺼짐'} (${e.source === 'robot' ? '로봇별 설정' : '기본값'}). 클릭하여 바꾸기`;
+      return;
+    }
+    // 여러 로봇 화면: 기본값 + 로봇별 설정 수 + 꺼진 로봇 수
+    const extra = [nOwn ? `로봇별 ${nOwn}` : '', nOff && safety.enabled ? `${nOff}대 꺼짐` : ''].filter(Boolean).join(' · ');
+    c.textContent = short ? `LiDAR · ${nOff === 0 ? '켜짐' : nOff === effs.length ? '꺼짐' : '일부 꺼짐'}`
+      : `LiDAR 안전 · ${vals(safety)}${extra ? ` · ${extra}` : ''}`;
+    c.dataset.on = nOff === 0 ? '1' : nOff === effs.length ? '0' : 'part';
+    c.title = `${robots.map((r) => `${r.name}: ${vals(effOf(r))}${effOf(r).source === 'robot' ? ' (로봇별)' : ''}`).join('\n')}\n클릭하여 바꾸기`;
+  }
+  const safetyEvText = {
+    stop: (d) => `LiDAR 안전: ${cm(d.d)} 앞에 물체가 있어 멈췄습니다 (반대쪽으로는 움직일 수 있음)`,
+    slow: (d) => `LiDAR 안전: ${cm(d.d)} 앞에 물체 → ${d.robot.safety.slow_speed} m/s 서행`,
+    noscan: (d) => `LiDAR 안전: 스캔이 없어 ${d.robot.safety.slow_speed} m/s 서행으로 제한합니다`,
+  };
+  document.addEventListener('tb3:safety-limit', (e) => {
+    const d = e.detail;
+    const f = safetyEvText[d.state];
+    if (f) toast(`${d.robot.name}: ${f(d)}`, d.state === 'stop' ? 'danger' : 'warn', 2500);
+  });
+
+  // 실행 중인 Nav2 collision_monitor 에 켜기·끄기를 바로 반영 (거리·속도는 Nav2 를 다시 띄워야 반영됨)
+  const CM_PARAMS = ['LidarStop.enabled', 'LidarStop.radius', 'LidarSlow.enabled', 'LidarSlow.radius', 'LidarSlow.linear_limit'];
+  async function nav2Safety(r) {
+    try {
+      const res = await ros.callService(r.topic('collision_monitor/get_parameters'), { names: CM_PARAMS },
+        { type: 'rcl_interfaces/srv/GetParameters', timeout: 3000 });
+      const v = (res.values || []).map((p) => (p.type === 1 ? p.bool_value : p.type === 3 ? p.double_value : null));
+      if (v.length !== CM_PARAMS.length || v.some((x) => x === null)) return { state: 'old' };   // LidarStop 없는 파라미터로 뜬 Nav2
+      return { state: 'ok', enabled: v[0] && v[2], stop_dist: v[1], slow_dist: v[3], slow_speed: v[4] };
+    } catch (e) { return { state: 'absent' }; }
+  }
+  // 로봇마다 그 로봇의 적용 값으로 켜기·끄기. 반환: robot id -> 'ok' | 'old' | 'absent'
+  async function applySafetyToNav2(list = robots) {
+    const bool = (b) => ({ type: 1, bool_value: b });
+    const out = {};
+    await Promise.all(list.map(async (r) => {
+      const en = effOf(r).enabled;
+      try {
+        const res = await ros.callService(r.topic('collision_monitor/set_parameters'),
+          { parameters: [{ name: 'LidarStop.enabled', value: bool(en) }, { name: 'LidarSlow.enabled', value: bool(en) }] },
+          { type: 'rcl_interfaces/srv/SetParameters', timeout: 3000 });
+        out[r.id] = (res.results || []).length === 2 && res.results.every((x) => x.successful) ? 'ok' : 'old';
+      } catch (e) { out[r.id] = 'absent'; }
+    }));
+    return out;
+  }
+
+  async function openSafetyDialog() {
+    let dlg = $('#safety-dialog');
+    if (!dlg) {
+      dlg = document.createElement('dialog');
+      dlg.id = 'safety-dialog';
+      dlg.className = 'mode-dialog safety-dialog';
+      document.body.appendChild(dlg);
+    }
+    await loadSafety();
+    const s = safety;
+    const before = Object.fromEntries(robots.map((r) => [r.id, effOf(r)]));
+    // 켜기 + 정지·서행 거리(cm) + 서행 속도 입력 한 벌 (pre: id 앞부분)
+    const fields = (v) => `<div class="sf-fields">
+        <label class="sf-on"><input type="checkbox" data-k="enabled" ${v.enabled ? 'checked' : ''}> 켜기</label>
+        <label>정지 <input type="number" data-k="stop_dist" min="5" max="100" step="1" value="${(v.stop_dist * 100).toFixed(0)}"> cm</label>
+        <label>서행 <input type="number" data-k="slow_dist" min="10" max="200" step="1" value="${(v.slow_dist * 100).toFixed(0)}"> cm</label>
+        <label><input type="number" data-k="slow_speed" min="0.01" max="0.22" step="0.01" value="${v.slow_speed}"> m/s</label>
+      </div>`;
+    const read = (box) => {
+      const q = (k) => box.querySelector(`[data-k="${k}"]`);
+      return { enabled: q('enabled').checked, stop_dist: Number(q('stop_dist').value) / 100,
+        slow_dist: Number(q('slow_dist').value) / 100, slow_speed: Number(q('slow_speed').value) };
+    };
+    const nameOf = (id) => (id ? (robots.find((r) => r.id === id) || { name: id }).name : '기본값');
+    dlg.innerHTML = `<form method="dialog" class="col" style="gap: 12px">
+      <div class="panel-head" style="justify-content: space-between"><h2 style="font-size: 17px">LiDAR 안전 구역</h2><button value="cancel" class="btn btn-icon" aria-label="닫기">✕</button></div>
+      <div class="muted" style="font-size: 12px">로봇 중심에서 정지 거리 안에 물체가 보이면 정지, 서행 거리 안이면 서행 속도로 줄입니다.</div>
+      <div class="sf-box" id="sf-fleet"><div class="sf-title"><b>기본값</b><span class="muted">따로 설정하지 않은 로봇에 적용</span></div>${fields(s)}</div>
+      <div class="col" style="gap: 8px">
+        <div class="muted" style="font-size: 12px">로봇별 (Nav2 상태는 지금 실행 중인 collision_monitor 의 값)</div>
+        ${robots.map((r) => {
+          const e = effOf(r);
+          return `<div class="sf-box" data-robot="${esc(r.id)}">
+            <div class="sf-title"><span class="swatch" style="background: ${esc(r.color)}"></span><b>${esc(r.name)}</b>
+              <select data-mode aria-label="${esc(r.name)} 설정 방식"><option value="fleet"${e.source === 'fleet' ? ' selected' : ''}>기본값 따름</option><option value="robot"${e.source === 'robot' ? ' selected' : ''}>따로 설정</option></select></div>
+            <div data-own${e.source === 'robot' ? '' : ' hidden'}>${fields(e)}</div>
+            <div class="sf-nav2 muted" data-nav2>Nav2 확인 중…</div>
+          </div>`;
+        }).join('') || '<span class="muted">등록된 로봇 없음</span>'}
+      </div>
+      <details style="font-size: 12px"${safetyChanges.length ? '' : ' hidden'}>
+        <summary class="muted" style="cursor: pointer">최근 변경 ${safetyChanges.length}건</summary>
+        <div class="col" style="gap: 3px; margin-top: 6px">${safetyChanges.slice(0, 10).map((c) => `<div style="display: flex; gap: 8px; flex-wrap: wrap">
+          <span class="muted mono" style="min-width: 92px">${esc(new Date(c.t * 1000).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</span>
+          <b>${esc(nameOf(c.robot))}</b>
+          ${c.action === 'clear' ? '<span class="muted">기본값으로</span>' : ''}
+          <span class="sf-${c.enabled ? 'ok' : 'warn'}">${c.enabled ? '켜짐' : '꺼짐'}</span>
+          <span>${cm(c.stop_dist)} / ${cm(c.slow_dist)} · ${c.slow_speed} m/s</span><span class="muted">${esc(c.by || '')}</span></div>`).join('')}</div>
+      </details>
+      <div class="muted" style="font-size: 11px; line-height: 1.5">
+        · 켜기·끄기는 실행 중인 Nav2 와 웹 조종에 바로 반영됩니다. 거리·속도를 바꾸면 웹 조종은 바로, Nav2 는 그 로봇의 Nav2 를 다시 실행할 때 반영됩니다.<br>
+        · 웹 조종은 진행 방향 쪽 물체만 보고, 멈춘 뒤에도 반대쪽으로 빠져나가거나 제자리 회전할 수 있습니다. Nav2 는 어느 방향이든 정지합니다.<br>
+        · 끄기와 값 바꾸기는 관리자 토큰이 필요합니다 (켜기만 하면 필요 없음). 다른 teleop 이 보내는 cmd_vel 은 막지 못합니다.
+      </div>
+      <div style="display: flex; gap: 8px"><button value="cancel" class="btn" style="flex: 1 1 0; min-height: 44px">취소</button>
+        <button value="ok" class="btn btn-primary" style="flex: 2 1 0; min-height: 44px">저장하고 적용</button></div>
+    </form>`;
+    dlg.querySelectorAll('[data-robot]').forEach((box) => {
+      box.querySelector('[data-mode]').addEventListener('change', (ev) => { box.querySelector('[data-own]').hidden = ev.target.value !== 'robot'; });
+    });
+    dlg.showModal();
+    // 로봇별 Nav2 에 지금 들어가 있는 값 (그 로봇의 적용 값과 다르면 Nav2 다시 실행 필요)
+    robots.forEach(async (r) => {
+      const n = await nav2Safety(r);
+      const el = dlg.querySelector(`[data-robot="${CSS.escape(r.id)}"] [data-nav2]`);
+      if (!el) return;
+      const e = before[r.id];
+      let txt; let cls = 'muted';
+      if (n.state === 'absent') txt = 'Nav2 없음 (다음 실행 때 이 로봇의 값으로 뜸)';
+      else if (n.state === 'old') { txt = 'Nav2: 안전 구역 없는 파라미터로 실행됨 → 다시 실행 필요'; cls = 'warn'; }
+      else {
+        const same = SAFETY_KEYS.every((k) => Math.abs(n[k] - e[k]) < 1e-3);
+        txt = `Nav2: ${n.enabled ? '켜짐' : '꺼짐'} · ${cm(n.stop_dist)} / ${cm(n.slow_dist)} · ${n.slow_speed} m/s${same ? '' : ' → 값이 달라 다시 실행 필요'}`;
+        cls = same && n.enabled === e.enabled ? 'ok' : 'warn';
+      }
+      el.className = `sf-nav2 sf-${cls}`;
+      el.textContent = txt;
+    });
+    dlg.onclose = async () => {
+      if (dlg.returnValue !== 'ok') return;
+      const by = control.label;   // 이력에 남길 바꾼 화면 (예: 'PC ab12')
+      const fleetNew = read(dlg.querySelector('#sf-fleet'));
+      // 보낼 요청: 기본값이 바뀌었으면 PUT, 로봇마다 따로 설정 저장(PUT)·기본값으로 되돌리기(DELETE)
+      const reqs = [];
+      if (!sameVals(fleetNew, s)) reqs.push(['기본값', '/api/safety', 'PUT', fleetNew]);
+      dlg.querySelectorAll('[data-robot]').forEach((box) => {
+        const id = box.dataset.robot;
+        const mode = box.querySelector('[data-mode]').value;
+        const e = before[id];
+        const url = `/api/safety/robots/${encodeURIComponent(id)}`;
+        if (mode === 'robot') {
+          const v = read(box.querySelector('[data-own]'));
+          if (e.source !== 'robot' || !sameVals(v, e)) reqs.push([nameOf(id), url, 'PUT', v]);
+        } else if (e.source === 'robot') reqs.push([nameOf(id), `${url}?by=${encodeURIComponent(by)}`, 'DELETE', null]);
+      });
+      if (!reqs.length) { toast('바뀐 것이 없습니다', 'info', 2500); return; }
+      const failed = [];
+      for (const [label, url, method, body] of reqs) {
+        try {
+          await adminJson(url, { method, body: body ? JSON.stringify({ ...body, by }) : undefined });
+        } catch (err) { failed.push(`${label}: ${err.message}`); if (/토큰/.test(err.message)) break; }
+      }
+      await loadSafety();
+      // 적용 값이 바뀐 로봇만 Nav2 에 켜기·끄기를 보냄
+      const changed = robots.filter((r) => !sameVals(effOf(r), before[r.id]));
+      const res = await applySafetyToNav2(changed);
+      const n = (st) => Object.values(res).filter((x) => x === st).length;
+      const distChanged = changed.filter((r) => SAFETY_KEYS.some((k) => Math.abs(effOf(r)[k] - before[r.id][k]) > 1e-6));
+      const parts = [`LiDAR 안전 저장 (적용 값이 바뀐 로봇 ${changed.length}대)`];
+      if (n('ok')) parts.push(`Nav2 ${n('ok')}대에 켜기·끄기 바로 반영`);
+      if (n('absent')) parts.push(`${n('absent')}대는 Nav2 없음`);
+      if (n('old')) parts.push(`${n('old')}대는 Nav2 다시 실행 필요`);
+      if (distChanged.some((r) => res[r.id] === 'ok')) parts.push(`거리·속도는 Nav2 를 다시 실행해야 반영 (${distChanged.filter((r) => res[r.id] === 'ok').map((r) => r.name).join(', ')})`);
+      if (failed.length) toast(`저장하지 못한 것: ${failed.join(' / ')}`, 'danger', 8000);
+      if (failed.length < reqs.length) toast(parts.join(' · '), 'ok', 7000);
+    };
+  }
+
   function robotUrl(id, page) {
     const u = new URL(page || location.pathname, location.href);
     u.searchParams.set('robot', id);
@@ -265,10 +468,15 @@
     const wrap = document.createElement('div');
     wrap.style.cssText = 'display: flex; gap: 8px; align-items: center';
     wrap.innerHTML = '<button class="mode-chip" id="mode-chip" title="운영 모드 바꾸기">모드 —</button>'
+      + '<button class="mode-chip safety-chip" id="safety-chip" data-on="1">LiDAR 안전 —</button>'
       + '<a class="alert-chip hidden" id="alert-chip" href="patrol.html" title="확인 안 한 경보"></a>';
+    // 휴대폰 상단(.m-head)은 좁아서 칩들이 다음 줄로 내려갈 수 있게
+    if (bar.matches('.m-head')) { bar.style.flexWrap = 'wrap'; wrap.style.flexWrap = 'wrap'; }
     const spacer = bar.querySelector('.spacer');
     if (spacer) bar.insertBefore(wrap, spacer); else bar.appendChild(wrap);
     $('#mode-chip').addEventListener('click', openModeDialog);
+    $('#safety-chip').addEventListener('click', openSafetyDialog);
+    renderSafety();
   }
   function renderMode() {
     const c = $('#mode-chip');
@@ -293,6 +501,7 @@
       }
       renderMode();
     } catch (e) { /* serve.py 없이 열었을 때 */ }
+    loadSafety();   // 다른 브라우저가 LiDAR 안전 구역을 바꿨을 수 있음
   }
   // 경비 중 새 경보: 토스트 + 소리 + (허용했으면) 브라우저 알림
   function alertNotify(a) {
@@ -371,6 +580,7 @@
   const App = {
     ros, store, $, $$, esc, fmt, toast, toastAction, estop, trackGoal, robotUrl, control,
     get mode() { return modeState; }, openModeDialog, pollMode,
+    get safety() { return safety; }, openSafetyDialog, loadSafety,
     get fleet() { return fleet; },
     get zones() { return zonesDoc; },
     loadZones, adminFetch, adminJson, setActiveMap,
@@ -385,8 +595,10 @@
     document.addEventListener('DOMContentLoaded', async () => {
       await loadFleet();
       await loadZones();
+      await loadSafety();
       bindHeader();
       if (!document.body.dataset.noMode) { modeWidget(); pollMode(); setInterval(pollMode, 3000); watchAlerts(); }
+      else setInterval(loadSafety, 3000);
       // 현재 로봇의 기본 상태 구독 (배터리 표시, 구역 판정용 지도 위치). 플릿 페이지는 직접 모든 로봇을 시작함
       if (!document.body.dataset.fleet) robot.start({ tf: true });
       robot.onChange(renderBattery);

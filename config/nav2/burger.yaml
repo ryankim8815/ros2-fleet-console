@@ -2,6 +2,8 @@
 # turtlebot3_navigation2/param/burger.yaml 에서 실제 TurtleBot3 로 찾은 두 가지만 고침:
 #   collision_monitor.base_shift_correction: false, source_timeout: 0.5
 #   (LDS-02 스캔 시각 TF 가 늦어 'invalid source' 로 정지가 반복되던 문제)
+# 그리고 collision_monitor 의 기본 PolygonStop·PolygonSlow 를 LiDAR 안전 구역 LidarStop·LidarSlow(원형, safety.py)로 바꿈.
+# Pinky Pro 는 이 파일을 바탕으로 한 pinky.yaml 을 씀 → 여기서 공통 값을 바꾸면 pinky.yaml 도 같이 바꿀 것.
 # nav2_ns.launch.py 가 실행할 때 로봇에 맞게 프레임·토픽·cmd_vel 타입·keepout 필터를 고쳐 씁니다.
 amcl:
   ros__parameters:
@@ -344,23 +346,26 @@ collision_monitor:
     stop_pub_timeout: 2.0
     enable_stamped_cmd_vel: true
     use_realtime_priority: false
-    polygons: ["PolygonStop", "PolygonSlow", "FootprintApproach"]
-    PolygonStop:
+    # LidarStop·LidarSlow: LiDAR 안전 구역 (DB data/fleet.db, 웹 상단 'LiDAR 안전' 칩). 값은 nav2_params.py 가 실행 때 채움.
+    # 켜기·끄기는 실행 중 <ns>/collision_monitor 의 LidarStop.enabled·LidarSlow.enabled 로 바로 바뀜 (거리·속도는 재시작 필요)
+    polygons: ["LidarStop", "LidarSlow", "FootprintApproach"]
+    LidarStop:
       type: "circle"
-      radius: 0.1
+      radius: 0.20          # base_footprint 중심에서 이 거리 안에 물체 → 정지
       action_type: "stop"
-      min_points: 4
+      min_points: 3
       visualize: true
-      polygon_pub_topic: "polygon_stop"
+      polygon_pub_topic: "polygon_lidar_stop"
       enabled: true
-    PolygonSlow:
-      type: "polygon"
-      points: "[[0.1, 0.1], [0.1, -0.1], [-0.1, -0.1], [-0.1, 0.1]]"
-      action_type: "slowdown"
-      min_points: 4
-      slowdown_ratio: 0.3
+    LidarSlow:
+      type: "circle"
+      radius: 0.50          # 이 거리 안에 물체 → 직진 속도를 linear_limit 로 제한
+      action_type: "limit"
+      min_points: 3
+      linear_limit: 0.05    # 서행 속도 (m/s)
+      angular_limit: 10.0   # 회전은 제한하지 않음 (로봇 최대보다 큼)
       visualize: true
-      polygon_pub_topic: "polygon_slowdown"
+      polygon_pub_topic: "polygon_lidar_slow"
       enabled: true
     PolygonLimit:
       type: "polygon"

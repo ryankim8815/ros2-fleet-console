@@ -468,7 +468,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    P["burger.yaml"] --> W["nav2_ns.launch.py<br/>프레임에 접두사 · 절대 토픽 → 상대<br/>enable_stamped_cmd_vel (Pinky=false)"]
+    P["burger.yaml (TurtleBot3)<br/>pinky.yaml (Pinky)<br/>종류는 fleet.json 에서"] --> W["nav2_ns.launch.py<br/>프레임에 접두사 · 절대 토픽 → 상대<br/>enable_stamped_cmd_vel (Pinky=false)<br/>LiDAR 안전 구역 (DB)"]
     W --> B["nav2_bringup<br/>namespace=X, use_namespace=True<br/>(/tf → X/tf remap)"]
     B --> A["X/amcl · X/map_server"]
     B --> N["X/bt_navigator · controller · planner …"]

@@ -93,7 +93,7 @@ flowchart LR
 4. 로봇마다 Nav2 를 띄웁니다. 활성 지도의 구역 마스크가 있으면 자동으로 Nav2 keepout 필터가 켜집니다.
    ```bash
    pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=tb3_01 frame_prefix:=tb3_01/ map:=lab
-   pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky_01 stamped:=false map:=lab
+   pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky_01 map:=lab
    ```
 5. 플릿 화면에서 로봇마다 **초기 위치**를 찍고 **목표 지정**.
 
@@ -116,7 +116,7 @@ flowchart LR
 - TurtleBot3 Jazzy bringup 은 `namespace` 인자를 지원하고, TF 프레임에 `tb3_01/` 접두사를 붙여 전역 `/tf` 로 보냅니다. 로봇별 Nav2 는 `<ns>/tf` 를 읽으므로 그때는 `tb3_ns.launch.py` 로 TF 도 `/tb3_01/tf` 로 보냅니다.
 - Pinky Pro bringup 은 namespace 인자가 없고 TF 프레임 이름이 고정(`odom`, `base_footprint`)이라, 래퍼 launch 가 네임스페이스를 씌우고 TF 를 `/pinky_01/tf` 로 분리합니다. LED·표정 서버도 같은 네임스페이스로 함께 띄웁니다.
 - 공유 지도 위에 로봇을 그리려면 각 로봇의 `map → <접두사>odom` TF 가 필요합니다 (로봇별 AMCL 또는 SLAM). 없으면 카드·표에는 보이지만 지도에는 "지도 위치 없음" 으로 표시됩니다.
-- 로봇별 Nav2 는 PC 에서 `pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=tb3_01 frame_prefix:=tb3_01/ map:=...` (Pinky 는 `stamped:=false`) 로 띄우고, 플릿 화면의 **초기 위치**로 AMCL 을 시작합니다. 자세히: [robot/README.md 7장](robot/README.md#7-nav2--공유-지도)
+- 로봇별 Nav2 는 PC 에서 `pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=tb3_01 frame_prefix:=tb3_01/ map:=...` 로 띄웁니다. 로봇 종류는 `config/fleet.json` 에서 네임스페이스로 찾아, 파라미터 파일(TurtleBot3 `config/nav2/burger.yaml`, Pinky `config/nav2/pinky.yaml`)과 cmd_vel 타입(`stamped`)을 자동으로 고릅니다. 그다음 플릿 화면의 **초기 위치**로 AMCL 을 시작합니다. 자세히: [robot/README.md 7장](robot/README.md#7-nav2--공유-지도)
 
 ### 로봇 등록
 
@@ -125,6 +125,7 @@ flowchart LR
 2. **폼에 채우기** → 이름·색 확인 → **연결 테스트**(토픽·서비스·TF 프레임 확인) → **목록에 추가** → **저장**.
 
 저장하면 `ros2-fleet-console/config/fleet.json` 에 기록됩니다. 직접 편집해도 됩니다.
+`config/` 의 현장별 파일(`fleet.json`, `mode.json`, `maps/`, `zones/`, `masks/`, `patrol/`)과 `admin_token` 은 PC 마다 달라 저장소에 넣지 않습니다 (`.gitignore`). 새로 받은 저장소에서는 로봇 등록부터 하면 됩니다. 저장소에 들어 있는 `config/` 파일은 Nav2 파라미터 `config/nav2/burger.yaml`·`pinky.yaml` 둘뿐입니다.
 저장에는 **관리자 토큰**이 필요합니다. 처음 저장할 때 묻고 그 브라우저에 기억합니다. 토큰은 처음 실행할 때 `ros2-fleet-console/config/admin_token` 에 만들어지고(권한 600), `cat ~/turtlebot3/ros2-fleet-console/config/admin_token` 으로 확인합니다. 환경 변수 `TB3_WEB_TOKEN` 으로 정할 수도 있습니다.
 
 ## 페이지
@@ -205,6 +206,30 @@ flowchart LR
 - 이미 구역 안에 있는 로봇은 수동 조종으로 빠져나올 수 있게 막지 않습니다.
 - 수동 조종 차단은 **이 웹에서 보낸 명령**에만 적용됩니다. 다른 teleop 이나 노드가 보내는 `cmd_vel` 은 막지 못합니다.
 
+### LiDAR 안전 구역 (가까운 물체 → 정지·서행)
+
+로봇 **중심**(`base_footprint`)에서 LiDAR 로 본 가장 가까운 물체까지의 거리로 속도를 줄입니다. **플릿 기본값** 하나와, 필요한 로봇만 **로봇별 설정**(덮어쓰기)을 둡니다. 로봇별 설정이 없는 로봇은 기본값을 따릅니다. 모든 페이지 상단의 **LiDAR 안전** 칩을 눌러 켜고 끄거나 값을 바꿉니다.
+
+| 구역 | 처음 기본값 | Nav2 (자율 주행·이동 경로·경비 순찰) | 웹 수동 조종 |
+| --- | --- | --- | --- |
+| 정지 | 20 cm 안 | 정지 (어느 방향이든, 회전 포함) | 진행 방향 쪽(앞/뒤 반)에 물체가 있으면 직진 0. 반대쪽으로 빠져나가기·제자리 회전은 됨 |
+| 서행 | 50 cm 안 | 직진 속도를 0.05 m/s 로 제한 (회전은 제한 안 함) | 같음 (진행 방향 쪽만) |
+
+- **켜기·끄기**: 실행 중인 Nav2 에도 바로 반영됩니다 (웹이 적용 값이 바뀐 로봇의 `<ns>/collision_monitor` 의 `LidarStop.enabled`·`LidarSlow.enabled` 를 바꿈). 어떤 로봇의 적용 값도 켜기만 바뀌면 토큰 없이, **끄기와 값 바꾸기(로봇별 설정을 기본값으로 되돌려 값이 바뀌는 경우 포함)는 관리자 토큰**이 필요합니다.
+- **거리·속도**: 웹 수동 조종에는 바로, Nav2 에는 **그 로봇의 Nav2 를 다시 실행할 때** 반영됩니다. collision_monitor 가 실행 중에는 이 값들의 변경을 받지 않습니다 (시험으로 확인). 설정 창에 로봇별 Nav2 에 지금 들어간 값이 보이고, 다르면 "Nav2 다시 실행 필요" 로 표시됩니다.
+- 범위: 정지 5–100 cm, 서행 10–200 cm (정지보다 5 cm 이상 커야 함), 서행 속도 0.01–0.22 m/s.
+- 바꾸는 곳: 상단 **LiDAR 안전** 칩 → 설정 창
+  - **기본값**: 켜기, 정지 거리·서행 거리(cm), 서행 속도(m/s)
+  - **로봇별**: 로봇마다 **기본값 따름 / 따로 설정**. 따로 설정이면 그 로봇만의 켜기·거리·속도를 넣습니다. 기본값 따름으로 바꾸면 로봇별 설정을 지웁니다. 로봇마다 지금 실행 중인 Nav2 의 값도 보입니다.
+  - **저장하고 적용** → 창 아래 **최근 변경**에 언제·어느 로봇(또는 기본값)을·어느 화면에서 바꿨는지가 보입니다.
+  - 상단 칩: 여러 로봇 화면(플릿 등)은 기본값과 `로봇별 n`·`n대 꺼짐`, 한 로봇 화면(대시보드·모바일)은 그 로봇에 적용되는 값을 보여 줍니다.
+- 저장: `data/fleet.db` 의 `safety_settings`(기본값 한 줄), `robot_safety`(로봇별 설정), `safety_changes`(바꿀 때마다 한 줄). DB 를 처음 만들거나 v2 로 올릴 때 기본값(켜짐, 20 cm / 50 cm / 0.05 m/s)이 들어갑니다. `nav2_ns.launch.py` 와 지도 만들기 자동 탐색의 Nav2 는 실행할 때 DB 를 읽기 전용으로 읽어, **네임스페이스로 로봇을 찾아 그 로봇의 적용 값**으로 (DB 가 없거나 로봇을 못 찾으면 기본값, 실행 로그에 `[로봇별]`/`[기본값]` 표시) collision_monitor 의 `LidarStop`(원형, stop)·`LidarSlow`(원형, limit) 구역을 만듭니다. Nav2 기본 `PolygonStop`·`PolygonSlow` 는 이 두 구역으로 바꿨습니다 (`config/nav2/burger.yaml`).
+- 웹 수동 조종은 스캔이 1초 넘게 안 오면 서행 속도로 제한합니다 (모르면 안전 쪽).
+- **LiDAR 최소 거리 주의**: LDS-02 는 0.16 m 보다 가까운 것을 재지 못해 값이 사라집니다. LiDAR 가 로봇 중심보다 3.2 cm 뒤에 있어, 앞쪽은 중심에서 약 13 cm 까지 보이지만 **뒤쪽은 중심에서 약 19 cm 안부터 안 보입니다**.
+  - 웹 수동 조종: 가까이 있던 물체가 안 보이게 되면, 로봇이 3 cm·10° 넘게 움직이기 전까지 "아주 가까이 있음"으로 기억하고 그쪽으로 정지합니다. 물체를 치운 뒤에도 정지가 남으면 반대쪽으로 조금 움직이면 풀립니다.
+  - Nav2(collision_monitor)는 이런 기억이 없습니다. 서행 구역(0.05 m/s)을 지나며 다가가야 정지가 제때 걸립니다. 기본 정지 거리 20 cm 는 뒤쪽에서 LDS-02 가 볼 수 있는 한계(약 19 cm)에 가까워, 뒤로 갈 때는 여유가 1 cm 정도뿐입니다. 정지 거리를 19 cm 보다 작게 줄이면 Nav2 는 뒤쪽 물체로 정지하지 못합니다.
+- 웹에서 보낸 조종과 Nav2 만 막습니다. 다른 teleop 이나 노드가 `cmd_vel` 에 직접 보내는 명령은 막지 못합니다.
+
 ### 종류별 장치
 
 | TurtleBot3 | Pinky Pro |
@@ -221,6 +246,7 @@ flowchart LR
 - **조종 권한**: 한 로봇은 한 브라우저만 조종합니다. 조종하는 동안 3초짜리 권한을 1초마다 갱신하고, 손을 떼면 놓습니다. 다른 브라우저는 "○○ 이(가) 조종 중" 알림과 **넘겨받기** 버튼을 봅니다. 비상정지는 권한과 상관없이 동작합니다.
 - 로봇 간 거리가 0.5 m 미만이면 플릿 지도에 빨간 경고와 이벤트를 띄웁니다.
 - 이동 구역: Nav2 는 keepout 마스크로, 웹 수동 조종은 명령 예측으로 금지 구역 진입을 막습니다 (위 "이동 구역 규칙").
+- LiDAR 안전 구역: 로봇 중심에서 20 cm 안 물체 → 정지, 50 cm 안 → 0.05 m/s 서행 (처음 기본값, 로봇별로 바꿀 수 있음. Nav2·웹 조종 모두, 상단 칩으로 켜고 끔. 위 "LiDAR 안전 구역").
 - 모드 변경, 지도 만들기 시작·정지·저장, 구역·순찰 경로·지점·이동 경로 저장과 할당, 이동 경로 시작·이어서, 기준 지도 반영, 활성 지도 지정은 관리자 토큰이 필요합니다. 경보를 "이상 없음/오탐"으로 처리하는 것은 토큰 없이 됩니다 (같은 출처만).
 - 이동 경로를 시작한 로봇은 스스로 움직입니다. 경로 화면의 **멈춤·정지**(토큰 불필요) 또는 **전체 비상정지**로 세웁니다. 실행기가 꺼지면 보낸 goal 을 취소하고 끝나며, 서버를 다시 켜면 실행 중이던 경로는 **멈춤**이 되어 스스로 다시 출발하지 않습니다.
 - 경비 모드의 로봇은 스스로 움직입니다. 순찰 경로는 이동 구역 안쪽으로 잡으세요. 경비 화면의 로봇별 **멈춤**, 또는 **전체 비상정지**(모든 로봇 순찰도 멈춤)로 세웁니다. 비상정지 뒤 순찰은 경비 화면에서 로봇마다 **재개**해야 다시 돕니다.
@@ -248,14 +274,18 @@ flowchart LR
 | | `route_run_events` | 실행 안에서 일어난 일 (`start` `resume` `pause` `stop` `loop` `done` `fail` `edit`) |
 | 경비 | `alerts` | 경비 경보 (`map` → `maps`) |
 | | `alert_robots` | 경보를 본 로봇(→ `robots`)마다 한 줄 (처음·마지막 본 시각, 횟수) |
+| 안전 | `safety_settings` | LiDAR 안전 구역 기본값: 켜짐, 정지·서행 거리, 서행 속도 (한 줄, `id = 1`) |
+| | `robot_safety` | 로봇별 설정 (→ `robots`). 줄이 없는 로봇은 기본값 |
+| | `safety_changes` | 바꿀 때마다 한 줄 (시각, 로봇 또는 NULL = 기본값, `set`/`clear`, 바뀐 뒤 값, 바꾼 화면 `by`) |
 
-- **값 검사**: 좌표 범위, 방향(−π..π), 이름 길이, 반복 횟수(0~10000), 실행·경보의 상태 값은 CHECK 제약으로 DB 가 직접 막습니다. `sqlite3` 로 직접 고쳐도 깨지지 않습니다. "같은 지점을 연달아 넣지 않기"만 앱에서 검사합니다.
+- **값 검사**: 좌표 범위, 방향(−π..π), 이름 길이, 반복 횟수(0~10000), 실행·경보의 상태 값, LiDAR 안전 구역 값 범위(서행 거리 ≥ 정지 거리 + 5 cm 포함)는 CHECK 제약으로 DB 가 직접 막습니다. `sqlite3` 로 직접 고쳐도 깨지지 않습니다. "같은 지점을 연달아 넣지 않기"만 앱에서 검사합니다.
 - **지우기 규칙**: 경로에서 쓰는 지점, 로봇에 할당된 경로는 지울 수 없습니다. 경로를 지우면 실행 이력의 `route_id` 는 비고 `route_name` 은 남습니다. 할당을 해제해도 실행 이력은 남습니다.
-- **스키마 버전**: `PRAGMA user_version` 으로 관리합니다 (지금 1). 나중에 스키마를 바꿀 때는 `fleet_db.py` 의 `MIGRATIONS` 끝에 함수를 하나 더합니다. 서버를 켤 때 낮은 버전이면 순서대로 바꾸고, 바꾸기 전에 `data/fleet.db.bak-v<이전 버전>` 으로 백업하며, 실패하면 그 단계 전체를 되돌리고 서버가 멈춥니다 (DB 는 이전 그대로).
+- **스키마 버전**: `PRAGMA user_version` 으로 관리합니다 (지금 2: v2 에서 `safety_settings`·`robot_safety`·`safety_changes` 추가). 나중에 스키마를 바꿀 때는 `fleet_db.py` 의 `MIGRATIONS` 끝에 함수를 하나 더합니다. 서버를 켤 때 낮은 버전이면 순서대로 바꾸고, 바꾸기 전에 `data/fleet.db.bak-v<이전 버전>` 으로 백업하며, 실패하면 그 단계 전체를 되돌리고 서버가 멈춥니다 (DB 는 이전 그대로).
 - 예전에 쓰던 `data/places.db`·`data/alerts.db` 는 더 이상 쓰지 않습니다 (옮기지 않음). 남아 있으면 서버가 시작할 때 알려 주며, 지워도 됩니다.
 
 ```bash
 sqlite3 ros2-fleet-console/data/fleet.db "SELECT a.robot_id, r.name, a.repeat_count, x.state, x.loops_done FROM route_assignments a JOIN routes r ON r.id = a.route_id LEFT JOIN route_runs x ON x.id = a.current_run_id"
+sqlite3 ros2-fleet-console/data/fleet.db "SELECT datetime(t, 'unixepoch', 'localtime'), ifnull(robot_id, '(기본값)'), action, enabled, stop_dist, slow_dist, slow_speed, by FROM safety_changes ORDER BY t DESC LIMIT 10"
 sqlite3 ros2-fleet-console/data/fleet.db "SELECT datetime(t, 'unixepoch', 'localtime'), kind, loop, message FROM route_run_events WHERE run_id = 3 ORDER BY t"
 ```
 
@@ -265,21 +295,23 @@ sqlite3 ros2-fleet-console/data/fleet.db "SELECT datetime(t, 'unixepoch', 'local
 ros2-fleet-console/
   config/fleet.json      로봇 목록, 활성 지도(mapFile) (setup.html·지도 화면에서 저장)
   config/admin_token     관리자 토큰 (처음 실행 때 생성, 600)
-  config/nav2/burger.yaml   기본 Nav2 파라미터 (실제 TurtleBot3 에서 찾은 collision_monitor 수정 포함)
+  config/nav2/burger.yaml   TurtleBot3 Nav2 파라미터 (실제 TurtleBot3 에서 찾은 collision_monitor 수정, LiDAR 안전 구역 포함)
+  config/nav2/pinky.yaml    Pinky Pro Nav2 파라미터 (burger.yaml 에서 로봇 크기·최대 속도·cmd_vel 타입만 다름)
   config/maps/<이름>.yaml|pgm      저장한 지도 (지도 작성)
   config/zones/<이름>.json         그 지도의 이동 구역
   config/masks/<이름>/<ns>.yaml|pgm 로봇별 keepout 마스크 (구역 저장 때 생성)
   config/mode.json       현재 운영 모드 (운영 / 지도 만들기 / 경비)
   config/patrol/<이름>.json        그 지도의 순찰 경로(로봇별)와 감지 설정
-  data/fleet.db          SQLite DB 하나: 지도·로봇 참조, 지점, 이동 경로, 할당, 실행 이력, 경보 (서버를 켤 때 없으면 생성)
+  data/fleet.db          SQLite DB 하나: 지도·로봇 참조, 지점, 이동 경로, 할당, 실행 이력, 경보, LiDAR 안전 구역 (서버를 켤 때 없으면 생성)
   data/fleet.db.bak-v<n> 스키마를 올리기 전 자동 백업
   logs/mapping.log, logs/patrol.log, logs/routes.log  지도 만들기·경비·이동 경로 프로세스 로그
   launch/web.launch.py   rosbridge(+rosapi) 와 serve.py 실행 (bind 인자)
-  serve.py               정적 파일 + /api/fleet · control · maps · zones · places · routes · assignments · mapping · mode · patrol · alerts, 경비 감시(재시작)
+  serve.py               정적 파일 + /api/fleet · control · maps · zones · places · routes · assignments · mapping · mode · patrol · alerts · safety, 경비 감시(재시작)
   maps.py                지도 목록·이미지, 구역 검증, 마스크 생성, 기준 지도 반영, 지도 만들기·경비 프로세스 관리
   fleet_db.py            DB 스키마 (테이블·제약·인덱스) 와 연결
   dbutil.py              SQLite 연결 + 없으면 생성 + 스키마 버전 마이그레이션 (백업, 실패 시 되돌림)
   patrol_store.py        모드 파일, 순찰 설정 검증, 경보 DB
+  safety.py              LiDAR 안전 구역 설정 읽기·검증·저장·변경 이력 (DB, serve.py 와 robot/nav2_params.py 가 씀)
   places.py              지점·경로·할당·실행 이력 (검증, CRUD, 로봇·지도 동기화, 실행기용 진행 기록)
   robot/tb3_ns.launch.py    TurtleBot3 네임스페이스 + TF 분리 래퍼 (로봇에서 실행)
   robot/pinky_ns.launch.py  Pinky Pro 네임스페이스 + TF 분리 래퍼 (로봇에서 실행)
@@ -289,7 +321,7 @@ ros2-fleet-console/
   robot/map_merge_node.py   로봇별 지도를 시작 위치로 합쳐 /map_merged 발행
   robot/route_runner_node.py 이동 경로: 실행 중인 할당을 follow_waypoints 로 반복, 진행을 DB 에 (PC, 웹이 실행)
   robot/patrol_node.py      경비: 순찰(follow_waypoints) + 스캔/기준 지도 비교 + 경보 (PC, 웹이 실행)
-  robot/nav2_params.py      Nav2 파라미터 고치기(프레임 접두사·토픽·keepout) 공용 함수
+  robot/nav2_params.py      Nav2 파라미터 고치기(프레임 접두사·토픽·keepout·LiDAR 안전 구역) 공용 함수
   docs/architecture.md, docs/test-report.md
   web/
     fleet.html, index.html, interfaces.html, mobile.html, setup.html, mapping.html, zones.html, places.html, routes.html, patrol.html, alerts.html
@@ -308,7 +340,7 @@ ros2-fleet-console/
 - rosbridge 2.7.1 의 `/rosapi/action_type` 은 rosapi 를 종료시키므로 쓰지 않습니다 (액션 타입은 이름으로 추정).
 - `/map` 은 PNG 압축으로 3초 간격으로 받습니다 (1000×1000 지도 2.97 MB → 44 KB).
 - 플릿 화면은 통신량을 줄이려고 odom 을 최대 10 Hz, LiDAR 는 2초 간격(선택 로봇을 LiDAR 레이어로 볼 때만 0.2초)으로 받습니다. 한 로봇의 정확한 주기는 로봇 대시보드에서 봅니다.
-- Pinky 용 Nav2 파라미터(로봇 크기·속도)는 따로 만들지 않았습니다 (burger.yaml 사용).
+- Pinky 용 Nav2 파라미터(`config/nav2/pinky.yaml`)의 몸체 반지름(0.08 m)은 추정값이고 최대 속도(0.2 m/s)는 웹 조종 제한에 맞춘 값입니다. 실제 Pinky 로 확인해 맞춰야 합니다. burger.yaml 의 공통 값을 바꾸면 pinky.yaml 도 같이 바꿔야 합니다.
 - 지도 작성과 이동 구역은 가짜 로봇으로만 시험했습니다. 구역을 피하는 경로·주행, 마스크 즉시 반영, 수동 조종 차단은 확인했지만, 이 PC 의 가짜 로봇 환경이 느려 Nav2 가 목표까지 끝까지 가는 것은 (구역이 없어도) 확인하지 못했습니다.
 - 함께 지도 만들기는 **시작 위치를 사람이 넣는** 방식입니다 (지도끼리 자동 정합 없음). m-explore-ros2 의 `map_merge` 는 이 PC 의 OpenCV 에 없는 API(`invertAffineTransform`, `AKAZE`) 때문에 빌드되지 않아 직접 만든 합치기 노드를 씁니다.
 - 자동 탐색은 `ros2_ws/src/m-explore-ros2` 의 explore_lite 를 씁니다. 원본은 목표에 도착해도 그 frontier 가 남아 있으면 같은 목표를 끝없이 다시 보내는 문제가 있어, 도착한 frontier 를 blacklist 에 넣도록 **한 줄 고쳤습니다** (`explore/src/explore.cpp`, 주석 `local patch`).
