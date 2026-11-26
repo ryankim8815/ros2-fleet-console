@@ -4,6 +4,7 @@ window.App.ready.then(async (App) => {
   const { $, esc, toast } = App;
   const robots = App.robots;
   robots.forEach((r) => r.start({ tf: true, odomThrottle: 200 }));
+  App.watchPaths();   // 로봇마다 지금 가는 길(Nav2 계획)과 이번 바퀴에 남은 지점
 
   const view = new window.RobotView($('#canvas'), { scale: 60 });
   view.follow = false;
@@ -400,7 +401,7 @@ window.App.ready.then(async (App) => {
   setInterval(async () => { if (Object.keys(history).length) { await loadHistory(); renderAssigns(); } }, 3000);
   setInterval(() => {
     const active = current && current.name === App.fleet.mapFile;
-    view.state.robots = active ? robots.filter((r) => r.online && r.mapPose).map((r) => ({ name: r.name, color: r.color, pose: r.mapPose })) : [];
+    view.state.robots = active ? robots.filter((r) => r.online && r.mapPose).map((r) => ({ name: r.name, color: r.color, pose: r.mapPose, ...App.pathsFor(r) })) : [];
     view.invalidate();
   }, 300);
 

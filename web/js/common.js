@@ -534,6 +534,54 @@
     setInterval(renderAlarm, 1000);
   }
   let guardLive = { robots: {} };
+
+  // ---------- 로봇이 앞으로 갈 길 (지도에 그림) ----------
+  //   plan  = 지금 가는 길: Nav2 계획 경로에서 남은 부분 (Robot.remainingPlan, 멈추면 사라짐)
+  //   stops = 앞으로 들를 지점: 워커는 이동 경로의 이번 바퀴 남은 지점, 경비는 순회의 남은 지점
+  let workerStops = {};            // robot id -> [[x, y], ...]
+  let stopsTimer = null;
+  async function loadWorkerStops() {
+    if (!fleet.mapFile) { workerStops = {}; return; }
+    try {
+      const [a, rt] = await Promise.all([
+        fetch('/api/assignments', { cache: 'no-store' }).then((r) => r.json()),
+        fetch(`/api/routes?map=${encodeURIComponent(fleet.mapFile)}`, { cache: 'no-store' }).then((r) => r.json())]);
+      const byRoute = new Map((rt.routes || []).map((r) => [r.id, r]));
+      const out = {};
+      for (const x of a.assignments || []) {
+        const route = byRoute.get(x.route_id);
+        if (x.state !== 'running' || !route) continue;
+        out[x.robot_id] = route.points.slice(x.waypoint).map((p) => [p.x, p.y]);   // waypoint = 지금 가는 지점 (0부터)
+      }
+      workerStops = out;
+    } catch (e) { /* 다음에 */ }
+  }
+  // 지도를 그리는 화면에서 한 번 부름: 로봇마다 Nav2 계획 구독 + 워커 경로 진행 읽기(2초)
+  function watchPaths() {
+    robots.forEach((r) => r.watchPlan());
+    if (stopsTimer) return;
+    loadWorkerStops();
+    stopsTimer = setInterval(loadWorkerStops, 2000);
+  }
+  function stopsFor(r) {
+    if (workerStops[r.id]) return workerStops[r.id];
+    const g = guardLive.at && Date.now() - guardLive.at < 4000 ? (guardLive.robots || {})[r.id] : null;
+    if (g && g.ctrl === 'running' && g.plan && g.plan.length) return g.plan.slice(Math.min(g.waypoint, g.plan.length - 1));
+    return [];
+  }
+  function pathsFor(r) {
+    const plan = r.remainingPlan();
+    let stops = stopsFor(r);
+    // 진행(지점 번호)은 1~2초 늦게 올 수 있어, 지금 계획이 끝나는 곳(= 지금 가는 지점)에 가장 가까운 지점부터 보여 줌
+    if (plan && stops.length > 1) {
+      const [ex, ey] = plan[plan.length - 1];
+      let best = -1, bd = 0.5 * 0.5;
+      stops.forEach(([x, y], i) => { const d = (x - ex) ** 2 + (y - ey) ** 2; if (d < bd) { bd = d; best = i; } });
+      if (best > 0) stops = stops.slice(best);
+    }
+    return { plan, stops };
+  }
+
   let alarmBeepAt = 0;
   const alarmSeen = new Set();
   function renderAlarm() {
@@ -623,6 +671,7 @@
     ros, store, $, $$, esc, fmt, toast, toastAction, estop, trackGoal, robotUrl, control,
     get mode() { return modeState; }, openModeDialog, pollMode,
     get safety() { return safety; }, openSafetyDialog, loadSafety,
+    watchPaths, pathsFor,
     get fleet() { return fleet; },
     get zones() { return zonesDoc; },
     loadZones, adminFetch, adminJson, setActiveMap,

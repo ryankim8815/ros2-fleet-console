@@ -329,10 +329,27 @@
       if (st.goal) goalMarker(st.goal, 1);
       if (st.draft) goalMarker(st.draft, 0.7);
 
-      // 여러 로봇 (플릿 뷰): {pose, color, name, selected, plan, goal, scan}
+      // 여러 로봇 (플릿 뷰): {pose, color, name, selected, plan, stops, goal, scan}
+      //   stops = 앞으로 들를 지점(점선 + 작은 점, 다음 지점은 고리), plan = 지금 가는 길(실선 + 끝 점)
       if (st.robots && st.robots.length) {
         for (const r of st.robots) {
-          if (this.layers.path && r.plan) line(r.plan, r.color, 2.5);
+          if (this.layers.path && r.stops && r.stops.length && r.pose && !r.stale) {
+            ctx.globalAlpha = 0.6;
+            line([[r.pose.x, r.pose.y], ...r.stops], r.color, 1.5, [3, 6]);
+            ctx.fillStyle = r.color;
+            r.stops.forEach((p, i) => {
+              const [sx, sy] = this.toScreen(p[0], p[1]);
+              ctx.beginPath();
+              if (i === 0) { ctx.arc(sx, sy, 7, 0, Math.PI * 2); ctx.strokeStyle = r.color; ctx.lineWidth = 2; ctx.stroke(); } else { ctx.arc(sx, sy, 3, 0, Math.PI * 2); ctx.fill(); }
+            });
+            ctx.globalAlpha = 1;
+          }
+          if (this.layers.path && r.plan && r.plan.length > 1) {
+            line(r.plan, r.color, 3);
+            const [ex, ey] = this.toScreen(r.plan[r.plan.length - 1][0], r.plan[r.plan.length - 1][1]);
+            ctx.beginPath(); ctx.arc(ex, ey, 4.5, 0, Math.PI * 2); ctx.fillStyle = r.color; ctx.fill();
+            ctx.strokeStyle = '#0E1116'; ctx.lineWidth = 1.5; ctx.stroke();
+          }
           if (r.goal) {
             const [gx, gy] = this.toScreen(r.goal.x, r.goal.y);
             ctx.beginPath(); ctx.arc(gx, gy, 12, 0, Math.PI * 2);

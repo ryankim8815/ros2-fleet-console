@@ -5,6 +5,7 @@ window.App.ready.then(async (App) => {
   const robots = App.robots;
   const byId = (id) => robots.find((r) => r.id === id);
   robots.forEach((r) => r.start({ tf: true, odomThrottle: 200 }));
+  App.watchPaths();   // 로봇마다 지금 가는 길(Nav2 계획)과 다음 순회 지점
   const KIND = { new: '새로 생긴 것', missing: '사라진 것' };
   const SEV = { high: '높음', medium: '보통', low: '낮음' };
   const STATUS = { open: '미확인', ok: '이상 없음', false: '오탐', baseline: '기준 지도 반영' };
@@ -248,7 +249,7 @@ window.App.ready.then(async (App) => {
         <td class="mono" style="font-size: 12px">${esc(r.batteryText())}</td>
         <td style="white-space: nowrap">${btn} ${btn2}${start}</td></tr>`;
     }).join('') : '<tr><td colspan="7" class="muted">경비 역할인 로봇이 없습니다 → <a href="roles.html">역할 화면</a>에서 경비로 지정하세요</td></tr>');
-    view.state.robots = robots.filter((r) => r.online && r.mapPose).map((r) => ({ name: r.name, color: r.color, pose: r.mapPose, selected: false }));
+    view.state.robots = robots.filter((r) => r.online && r.mapPose).map((r) => ({ name: r.name, color: r.color, pose: r.mapPose, selected: false, ...App.pathsFor(r) }));
     // 지금 경비 중인 로봇의 자동 순회 지점
     view.state.routes = fresh ? Object.entries(pstatus.robots || {}).filter(([, x]) => x.plan && x.plan.length)
       .map(([id, x]) => ({ color: (byId(id) || { color: '#8B949E' }).color, loop: true, highlight: false, points: x.plan })) : [];

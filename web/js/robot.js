@@ -440,6 +440,31 @@
       return this._navStarting;
     }
 
+    // ---- 지금 가는 길 (Nav2 계획 경로 <ns>/plan) ----
+    // Nav2 는 주행 중 1초마다 다시 계획(navigate_to_pose_w_replanning: RateController 1 Hz)하고 그때마다 plan 을 냄.
+    // 누가 보낸 goal 이든(웹 목표, 워커의 이동 경로, 경비 순회) 같은 토픽이라 여기서 한 번에 봄.
+    watchPlan(throttleMs = 500) {
+      if (this._planUnsub) return;
+      this._planUnsub = this.ros.subscribe(this.topic('plan'), 'nav_msgs/msg/Path', (m) => {
+        let T = Pose2.identity;
+        if (norm(m.header.frame_id) !== 'map' && this.mapToOdom) T = this.mapToOdom.pose;   // odom 프레임 경로 → map
+        this.plan = { pts: (m.poses || []).map((ps) => Pose2.apply(T, ps.pose.position.x, ps.pose.position.y)), t: performance.now() };
+      }, { serverThrottle: throttleMs });
+      this.unsubs.push(() => { this._planUnsub(); this._planUnsub = null; });
+    }
+
+    // 앞으로 갈 길 [[x, y], ...] (map 프레임): 로봇 위치에서 시작해, 계획에서 이미 지나온 부분은 뺌.
+    // 계획을 PLAN_STALE_MS 넘게 못 받았으면(도착·취소·멈춤) null — 끝난 길이 지도에 남지 않게
+    remainingPlan(pose = this.mapPose) {
+      const p = this.plan;
+      if (!p || !p.pts.length || performance.now() - p.t > Robot.PLAN_STALE_MS) return null;
+      if (!pose) return p.pts;
+      let best = 0, bd = Infinity;
+      p.pts.forEach(([x, y], i) => { const d = (x - pose.x) ** 2 + (y - pose.y) ** 2; if (d < bd) { bd = d; best = i; } });
+      const rest = p.pts.slice(best + 1);
+      return rest.length ? [[pose.x, pose.y], ...rest] : null;
+    }
+
     navGoal(x, y, th, frame = 'map', onFeedback) {
       return this.ros.sendActionGoal(this.topic('navigate_to_pose'), 'nav2_msgs/action/NavigateToPose', {
         pose: { header: { frame_id: frame, stamp: { sec: 0, nanosec: 0 } }, pose: { position: { x, y, z: 0 }, orientation: P2().quat(th) } },
@@ -450,6 +475,7 @@
 
   Robot.UNSTABLE_MS = 1000;
   Robot.OFFLINE_MS = 5000;
+  Robot.PLAN_STALE_MS = 3000;     // Nav2 가 1초마다 다시 계획하므로 3초 넘게 없으면 주행이 끝난 것
   window.Pose2 = Pose2;
   window.Zones = { inPolygon, forbidden, bodyForbidden };
   window.Profiles = Profiles;

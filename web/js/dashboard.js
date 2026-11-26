@@ -116,12 +116,18 @@ window.App.ready.then((App) => {
   }, 1000);
 
   // ---- plan ----
+  let planAt = 0;
   ros.subscribe(R.topic('plan'), 'nav_msgs/msg/Path', (m) => {
     mon(R.topic('plan'));
     const T = frameToDisplay(m.header.frame_id);
     st.plan = (m.poses || []).map((ps) => P.apply(T, ps.pose.position.x, ps.pose.position.y));
+    planAt = performance.now();
     view.invalidate();
   }, { serverThrottle: 500 });
+  // Nav2 는 주행 중 1초마다 다시 계획 → 한동안 안 오면 도착·취소·멈춤: 끝난 길을 지움
+  setInterval(() => {
+    if (st.plan.length && performance.now() - planAt > window.Robot.PLAN_STALE_MS) { st.plan = []; view.invalidate(); }
+  }, 1000);
 
   // ================= 내비게이션 goal =================
   const goalBtn = $('#goal-btn');

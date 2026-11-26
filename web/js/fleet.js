@@ -28,16 +28,12 @@ window.App.ready.then((App) => {
 
   robots.forEach((r) => {
     r.start({ tf: true, odomThrottle: 100 });   // odom 최대 10 Hz
-    const x = { scan: null, plan: null, goal: null, lastMapPose: null, wasOnline: null, wasLow: false, nav: null };
+    const x = { scan: null, goal: null, lastMapPose: null, wasOnline: null, wasLow: false, nav: null };
     extra.set(r.id, x);
     setScanRate(r, SCAN_SLOW);
-    ros.subscribe(r.topic('plan'), 'nav_msgs/msg/Path', (m) => {
-      const f = norm(m.header.frame_id);
-      let T = P.identity;
-      if (f !== 'map' && r.mapToOdom) T = r.mapToOdom.pose;   // odom 프레임 경로 → map
-      x.plan = (m.poses || []).map((ps) => P.apply(T, ps.pose.position.x, ps.pose.position.y));
-    }, { serverThrottle: 1000 });
   });
+  // 로봇마다 지금 가는 길(Nav2 계획)과 앞으로 들를 지점(워커 경로·경비 순회) — 레이어 '경로'
+  App.watchPaths();
 
   // ================= 지도 =================
   const view = new window.RobotView($('#canvas'), { scale: 50 });
@@ -74,7 +70,7 @@ window.App.ready.then((App) => {
       if (pose && r.online) x.lastMapPose = pose;
       else if (x.lastMapPose) { pose = x.lastMapPose; stale = true; }
       const scan = r === sel && pose && !stale && x.scanLocal ? x.scanLocal.map(([a, b]) => P.apply(pose, a, b)) : null;
-      return { name: r.name, color: r.color, selected: r === sel, pose, stale, plan: x.plan, goal: x.goal, scan };
+      return { name: r.name, color: r.color, selected: r === sel, pose, stale, ...App.pathsFor(r), goal: x.goal, scan };
     });
     const noPose = robots.filter((r) => r.online && !r.mapPose).map((r) => r.name);
     $('#no-map-note').textContent = noPose.length ? `지도 위치 없음: ${noPose.join(', ')}` : '';
