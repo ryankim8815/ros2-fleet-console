@@ -33,6 +33,7 @@ from std_msgs.msg import String
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
 import dbutil  # noqa: E402
+import fleet_store  # noqa: E402
 import places as store  # noqa: E402
 
 NAV_WAIT_SEC = 30.0   # Nav2 가 없을 때 이 시간 동안 기다린 뒤 실패로 기록
@@ -167,29 +168,27 @@ class RobotRun:
 class RouteRunner(Node):
     def __init__(self):
         super().__init__('fleet_route_runner')
-        self.declare_parameter('fleet', '')
         self.declare_parameter('db', store.DB_PATH)
-        self.fleet_path = self.get_parameter('fleet').value
         self.db_path = self.get_parameter('db').value
         self.con = store.db(self.db_path)
         self.robots = {}
-        self.fleet_mtime = None
+        self.fleet_key = None
+        self.fleet_at = 0.0
         self.load_fleet()
         self.create_subscription(String, '/fleet/route_cmd', self.on_cmd, 10)
         self.timer = self.create_timer(0.5, self.tick)
         self.get_logger().info(f'이동 경로 실행기 시작: 로봇 {[r.name for r in self.robots.values()]}')
 
     def load_fleet(self):
-        try:
-            m = os.path.getmtime(self.fleet_path)
-        except OSError:
+        """로봇 목록 (DB robots, 5초마다). 바뀐 로봇만 다시 만듦"""
+        if time.time() - self.fleet_at < 5.0 and self.fleet_key is not None:
             return
-        if m == self.fleet_mtime:
+        self.fleet_at = time.time()
+        cfgs = {r['id']: r for r in fleet_store.robots(self.con)}
+        key = json.dumps(cfgs, sort_keys=True)
+        if key == self.fleet_key:
             return
-        self.fleet_mtime = m
-        with open(self.fleet_path, encoding='utf-8') as f:
-            fleet = json.load(f)
-        cfgs = {r['id']: r for r in fleet.get('robots', [])}
+        self.fleet_key = key
         for rid in list(self.robots):
             if rid not in cfgs or cfgs[rid]['ns'] != self.robots[rid].ns:
                 self.robots.pop(rid).cancel()
@@ -205,7 +204,7 @@ class RouteRunner(Node):
         jobs = store.runner_jobs(self.con)
         for rid, job in jobs.items():
             if rid not in self.robots:
-                store.runner_finish(self.con, job['run_id'], 'failed', '로봇 목록(fleet.json)에 없는 로봇입니다')
+                store.runner_finish(self.con, job['run_id'], 'failed', '로봇 목록에 없는 로봇입니다')
         for rid, r in self.robots.items():
             r.tick(jobs.get(rid))
 

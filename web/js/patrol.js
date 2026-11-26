@@ -301,6 +301,28 @@ window.App.ready.then(async (App) => {
   });
   window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 
+  // ---------- 장애물 처리 값 (DB obstacle_settings, 모든 지도 공통) ----------
+  const OB = [['standoff', '모일 때 장애물과 간격', 'm', 0.01], ['robot_gap', '나란히 선 로봇 사이 간격', 'm', 0.01],
+    ['push_speed', '미는 속도', 'm/s', 0.01], ['approach_speed', '닿을 때까지 다가가는 속도', 'm/s', 0.01],
+    ['segment', '한 번에 미는 거리 (그다음 물러나 다시 잼)', 'm', 0.1], ['exit_tol', '출구 도착 허용 거리', 'm', 0.05],
+    ['exit_radius', '출구 둘레 (경비가 새 장애물로 보지 않음)', 'm', 0.1], ['max_segments', '최대 구간 수', '번', 1],
+    ['gather_timeout', '모이기 시간 한도', '초', 10], ['max_deviation', '밀 길에서 벗어나도 되는 거리', 'm', 0.05]];
+  let obSettings = {};
+  try { obSettings = await (await fetch('/api/obstacle/settings', { cache: 'no-store' })).json(); } catch (e) { /* 서버 없음 */ }
+  $('#ob-fields').innerHTML = OB.map(([k, label, unit, step]) => `<label style="display: flex; gap: 8px; align-items: center; font-size: 12px">
+    <span class="muted" style="flex: 1 1 auto">${label}</span><input type="number" data-ob="${k}" step="${step}" value="${obSettings[k] ?? ''}" style="width: 80px">
+    <span class="muted" style="width: 28px">${unit}</span></label>`).join('');
+  $('#ob-fields').addEventListener('input', () => { $('#ob-save').disabled = false; });
+  $('#ob-save').addEventListener('click', async () => {
+    const body = {};
+    $$('[data-ob]').forEach((i) => { body[i.dataset.ob] = Number(i.value); });
+    try {
+      obSettings = await App.adminJson('/api/obstacle/settings', { method: 'PUT', body: JSON.stringify(body) });
+      $('#ob-save').disabled = true;
+      toast('장애물 처리 값을 저장했습니다 (다음 처리부터)', 'ok');
+    } catch (e) { toast(`저장 실패: ${e.message}`, 'danger', 6000); }
+  });
+
   function setTab(t) {
     tab = t;
     $$('[data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === t)));

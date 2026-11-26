@@ -1,8 +1,13 @@
 """ros2-fleet-console/web 정적 파일 서버 + 로봇 목록 API.
 
 - 정적 파일: 캐시 비활성화 (파일을 고치면 새로고침만으로 반영)
-- GET  /api/fleet   : ros2-fleet-console/config/fleet.json 읽기
+- GET  /api/fleet   : 로봇 목록·활성 지도·공유 지도 토픽·로봇 종류 (DB robots·fleet_settings·robot_types, fleet_store.py)
 - PUT  /api/fleet   : 검증 후 저장 (로봇 등록 페이지). 헤더 X-Admin-Token 필요 (ros2-fleet-console/config/admin_token)
+- GET  /api/robot-types, PUT /api/robot-types/<종류> (토큰) : 로봇 종류 프로필 (최대 속도, 몸체·Nav2 반지름, 배터리 전압)
+- GET  /api/events?since=&limit=    : 운영 이벤트 (프로세스 재시작, 모드, 장애물 처리 …)
+- GET  /api/mode/history, GET /api/roles/history?robot= : 모드·역할 변경 이력
+- GET  /api/mapping/starts, PUT (토큰) : 함께 지도 만들기 로봇별 시작 위치
+- GET  /api/obstacle/settings, PUT (토큰) : 장애물 처리 값 (모일 간격, 미는 속도, 구간, 도착 허용 …)
 - GET  /api/control : 로봇별 현재 조종자
 - POST /api/control : 조종 권한 lease (3초, 조종 중 1초마다 갱신) 받기·갱신·놓기·넘겨받기
 - GET  /api/maps              : 저장된 지도 목록 (config/maps)
@@ -41,6 +46,7 @@
        어떤 로봇의 적용 값도 켜기만 바뀌는 요청은 토큰 없이(같은 출처만), 끄기·값 바꾸기는 토큰
 
 데이터는 SQLite 파일 하나(data/fleet.db, 스키마는 fleet_db.py)에 있고, 서버를 켤 때 없으면 만듭니다.
+예전 파일(config/fleet.json, mode.json, zones/, patrol/)이 있으면 켤 때 DB 로 가져오고 <파일>.migrated 로 이름을 바꿉니다.
 쓰기 요청은 같은 출처(Origin = Host)만 허용합니다. rosbridge 자체에는 인증이 없으므로
 신뢰할 수 있는 네트워크에서만 사용하세요.
 """
@@ -62,6 +68,7 @@ import sqlite3
 
 import dbutil
 import fleet_db
+import fleet_store as FS
 import maps
 import patrol_store as store
 import obstacle as O
@@ -70,18 +77,16 @@ import roles
 import safety
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-FLEET_PATH = os.path.join(APP_DIR, 'config', 'fleet.json')
-DEFAULT_FLEET = {'mapTopic': '/map', 'robots': []}
 
 ID_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]{0,40}$')
 NS_RE = re.compile(r'^(/[A-Za-z][A-Za-z0-9_]*)*$')          # '' 또는 /a/b
 TOPIC_RE = re.compile(r'^/[A-Za-z][A-Za-z0-9_/]*$')
 PREFIX_RE = re.compile(r'^([A-Za-z][A-Za-z0-9_]*/)?$')       # '' 또는 name/
 COLOR_RE = re.compile(r'^#[0-9A-Fa-f]{6}$')
-TYPES = {'turtlebot3', 'pinky'}
+TYPES = {'turtlebot3', 'pinky'}   # DB robot_types 가 없을 때의 기본 종류
 
 
-def validate_fleet(data):
+def validate_fleet(data, types=None):
     if not isinstance(data, dict) or not isinstance(data.get('robots'), list):
         raise ValueError('robots 배열이 필요합니다')
     if len(data['robots']) > 32:
@@ -104,8 +109,11 @@ def validate_fleet(data):
         if not isinstance(name, str) or not (1 <= len(name) <= 40):
             raise ValueError(f'robots[{i}].name 은 1~40자여야 합니다')
         out['name'] = name
-        if r.get('type') not in TYPES:
-            raise ValueError(f'robots[{i}].type 은 {sorted(TYPES)} 중 하나여야 합니다')
+        if types is None:
+            with DB_LOCK:
+                types = set(FS.robot_types(DB())) or TYPES
+        if r.get('type') not in types:
+            raise ValueError(f'robots[{i}].type 은 {sorted(types)} 중 하나여야 합니다')
         out['type'] = r['type']
         if out['id'] in seen_id:
             raise ValueError(f'id 중복: {out["id"]}')
@@ -124,20 +132,42 @@ def validate_fleet(data):
 
 
 def read_fleet():
-    try:
-        with open(FLEET_PATH, encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return DEFAULT_FLEET
+    """{mapTopic, mapFile?, robots, types} — DB (fleet_store). 예전 config/fleet.json 과 같은 모양"""
+    with DB_LOCK:
+        return FS.read_fleet(DB())
 
 
 def write_fleet(data):
-    os.makedirs(os.path.dirname(FLEET_PATH), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(FLEET_PATH), suffix='.tmp')
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write('\n')
-    os.replace(tmp, FLEET_PATH)
+    with DB_LOCK:
+        FS.write_fleet(DB(), data)
+
+
+def read_mode():
+    """{'mode', 'since', 'run'} — DB fleet_settings (예전 config/mode.json)"""
+    with DB_LOCK:
+        return FS.read_mode(DB())
+
+
+def write_mode(mode, reason='', run=None):
+    """모드 바꾸기 + 이력(mode_changes) + 운영 이벤트"""
+    with DB_LOCK:
+        con = DB()
+        prev = FS.read_mode(con)['mode']
+        m = FS.write_mode(con, mode, reason, run)
+        if prev != mode:
+            FS.log_event(con, 'WARN' if mode == 'obstacle' else 'INFO', 'server',
+                         f'모드: {MODE_NAMES.get(prev, prev)} → {MODE_NAMES.get(mode, mode)}{f" ({reason})" if reason else ""}')
+        return m
+
+
+def log_event(level, source, message, robot_id=None):
+    """운영 이벤트 (DB events) + 서버 로그"""
+    print(message, flush=True)
+    try:
+        with DB_LOCK:
+            FS.log_event(DB(), level, source, message, robot_id)
+    except Exception as e:  # noqa: BLE001
+        print(f'이벤트 기록 실패: {e}', flush=True)
 
 
 TOKEN_PATH = os.path.join(APP_DIR, 'config', 'admin_token')
@@ -260,7 +290,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path == '/api/control':
                 return self._json(200, control_all())
             if path == '/api/maps':
-                return self._json(200, maps.list_maps())
+                with DB_LOCK:
+                    zm = maps.zone_maps(DB())
+                return self._json(200, maps.list_maps(zm))
+            if path == '/api/robot-types':
+                with DB_LOCK:
+                    return self._json(200, FS.robot_types(DB()))
+            if path == '/api/events':
+                q = self._query()
+                with DB_LOCK:
+                    return self._json(200, {'events': FS.list_events(DB(), q.get('since', 0), q.get('limit', 100))})
+            if path == '/api/mode/history':
+                with DB_LOCK:
+                    return self._json(200, {'changes': FS.mode_history(DB(), self._query().get('limit', 20))})
+            if path == '/api/roles/history':
+                q = self._query()
+                with DB_LOCK:
+                    return self._json(200, {'changes': roles.history(DB(), q.get('robot') or None, q.get('limit', 30))})
+            if path == '/api/mapping/starts':
+                with DB_LOCK:
+                    return self._json(200, FS.mapping_starts(DB()))
+            if path == '/api/obstacle/settings':
+                with DB_LOCK:
+                    return self._json(200, O.get_settings(DB()))
             m = re.match(r'^/api/maps/([^/]+)\.png$', path)
             if m:
                 body = maps.map_png(m.group(1))
@@ -272,7 +324,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return None
             m = re.match(r'^/api/zones/([^/]+)$', path)
             if m:
-                return self._json(200, maps.read_zones(m.group(1)))
+                with DB_LOCK:
+                    return self._json(200, maps.read_zones(DB(), m.group(1)))
             m = re.match(r'^/api/maps/([^/]+)/exit$', path)
             if m:
                 maps.map_info(m.group(1))
@@ -284,9 +337,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     con = DB()
                     run = O.current_run(con) or O.last_run(con)
                     ex = O.get_exit(con, mf) if mf else None
-                if ex:
-                    ex['radius'] = O.EXIT_RADIUS   # 경비가 '새로 생긴 것'으로 보지 않는 둘레
-                return self._json(200, {'run': run, 'handler': OBSTACLE.status(), 'mode': store.read_mode()['mode'], 'exit': ex})
+                    if ex:
+                        ex['radius'] = O.get_settings(con)['exit_radius']   # 경비가 '새로 생긴 것'으로 보지 않는 둘레
+                    events = O.run_events(con, run['id']) if run else []
+                return self._json(200, {'run': run, 'handler': OBSTACLE.status(), 'mode': read_mode()['mode'], 'exit': ex,
+                                        'events': events})
             if path == '/api/mapping':
                 return self._json(200, MAPPING.status())
             if path == '/api/mode':
@@ -294,7 +349,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path == '/api/roles':
                 with DB_LOCK:
                     items = roles.list_roles(DB())
-                return self._json(200, {'roles': items, 'guard': PATROL.status(), 'mode': store.read_mode()['mode'],
+                return self._json(200, {'roles': items, 'guard': PATROL.status(), 'mode': read_mode()['mode'],
                                         'map': read_fleet().get('mapFile')})
             if path == '/api/safety':
                 with DB_LOCK:
@@ -302,7 +357,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return self._json(200, safety.snapshot(con, self._query().get('limit', 10)))
             m = re.match(r'^/api/patrol/([^/]+)$', path)
             if m:
-                return self._json(200, store.read_patrol(m.group(1)))
+                maps.map_info(m.group(1))
+                with DB_LOCK:
+                    return self._json(200, store.read_patrol(DB(), m.group(1)))
             if path == '/api/alerts':
                 q = self._query()
                 with DB_LOCK:
@@ -318,7 +375,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path == '/api/assignments':
                 with DB_LOCK:
                     items = places.list_assignments(DB())
-                return self._json(200, {'assignments': items, 'runner': ROUTES.status(), 'mode': store.read_mode()['mode'],
+                return self._json(200, {'assignments': items, 'runner': ROUTES.status(), 'mode': read_mode()['mode'],
                                         'map': read_fleet().get('mapFile')})
             m = re.match(r'^/api/assignments/([A-Za-z][A-Za-z0-9_]{0,40})/runs$', path)
             if m:
@@ -578,23 +635,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._safety_write(msr.group(1))
         m = re.match(r'^/api/zones/([^/]+)$', path)
         mp = re.match(r'^/api/patrol/([^/]+)$', path)
-        if path != '/api/fleet' and not m and not mp:
+        mt = re.match(r'^/api/robot-types/([a-z][a-z0-9_]{0,29})$', path)
+        simple = path in ('/api/fleet', '/api/obstacle/settings', '/api/mapping/starts')
+        if not simple and not m and not mp and not mt:
             return self._json(404, {'error': 'not found'})
         if not self._authorized():
             return None
         try:
-            if m:
-                zones, masks = maps.write_zones(m.group(1), self._body(), read_fleet().get('robots', []))
-                return self._json(200, {'zones': zones, 'masks': masks})
-            if mp:
-                maps.map_info(mp.group(1))
-                ids = {r['id'] for r in read_fleet().get('robots', [])}
-                return self._json(200, store.write_patrol(mp.group(1), self._body(), ids))
-            data = validate_fleet(self._body())
-            write_fleet(data)
-            with DB_LOCK:   # robots 테이블도 맞춤 (빠진 로봇은 active = 0, 이력은 남김)
-                places.sync_robots(DB(), data['robots'])
-            return self._json(200, data)
+            body = self._body()
+            with DB_LOCK:
+                con = DB()
+                if m:
+                    fl = FS.read_fleet(con)
+                    radii = {t: v['radius'] for t, v in fl['types'].items()}
+                    zones, masks = maps.write_zones(con, m.group(1), body, fl['robots'], radii)
+                    return self._json(200, {'zones': zones, 'masks': masks})
+                if mp:
+                    maps.map_info(mp.group(1))
+                    return self._json(200, store.write_patrol(con, mp.group(1), body))
+                if mt:
+                    try:
+                        return self._json(200, FS.write_robot_type(con, mt.group(1), body))
+                    except KeyError:
+                        return self._json(404, {'error': '없는 로봇 종류입니다'})
+                if path == '/api/obstacle/settings':
+                    return self._json(200, O.set_settings(con, body))
+                if path == '/api/mapping/starts':
+                    return self._json(200, FS.write_mapping_starts(con, body))
+                data = validate_fleet(body, set(FS.robot_types(con)))
+                FS.write_fleet(con, data)     # 빠진 로봇은 active = 0 (이력은 남김)
+                return self._json(200, FS.read_fleet(con))
         except FileNotFoundError:
             return self._json(404, {'error': '없는 지도입니다'})
         except (ValueError, json.JSONDecodeError) as e:
@@ -610,12 +680,11 @@ _db_con = None
 
 
 def DB():
-    """data/fleet.db 연결 (DB_LOCK 안에서). 파일이 없으면(처음·실행 중 지워짐) 새로 만들고
-    로봇·지도 목록을 다시 채움 (지점·할당·경보의 외래 키 대상)."""
+    """data/fleet.db 연결 (DB_LOCK 안에서). 파일이 없으면(처음·실행 중 지워짐) 새로 만들고 지도 목록을 채움.
+    로봇 목록·설정은 DB 가 원본이라 DB 를 지우면 사라짐 (config/fleet.json 을 다시 두고 서버를 켜면 가져옴)."""
     global _db_con
     _db_con, fresh = dbutil.ensure(_db_con, fleet_db.DB_PATH, fleet_db.MIGRATIONS)
     if fresh:
-        places.sync_robots(_db_con, read_fleet().get('robots', []))
         places.sync_maps(_db_con, [m['name'] for m in maps.list_maps()])
     return _db_con
 MODE_LOCK = threading.RLock()
@@ -623,7 +692,7 @@ WATCHDOG = {'restarts': 0, 'last': None}
 
 
 def mode_status():
-    m = store.read_mode()
+    m = read_mode()
     with DB_LOCK:
         guards = [r for r in roles.list_roles(DB()) if r['role'] == 'guard']
     return {**m, 'mapping': MAPPING.status(),
@@ -638,7 +707,7 @@ def assignment_action(robot_id, action):
     """경로 시작·이어서·멈춤·정지. 시작·이어서는 운영 모드에서만, 실행기가 없으면 띄움."""
     with MODE_LOCK:
         if action in ('start', 'resume'):
-            mode = store.read_mode()['mode']
+            mode = read_mode()['mode']
             if mode != 'operate':
                 raise ValueError(f'운영 모드에서만 경로를 시작할 수 있습니다 (지금: {MODE_NAMES.get(mode, mode)})')
             with DB_LOCK:
@@ -649,7 +718,7 @@ def assignment_action(robot_id, action):
             a = places.control_assignment(DB(), robot_id, action, read_fleet().get('mapFile'))
         if action in ('start', 'resume') and not ROUTES.running():
             try:
-                ROUTES.start(FLEET_PATH, fleet_db.DB_PATH)
+                ROUTES.start(fleet_db.DB_PATH)
             except Exception as e:  # noqa: BLE001
                 with DB_LOCK:
                     places.pause_all(DB(), f'실행기를 시작하지 못함: {e}')
@@ -666,11 +735,11 @@ def route_watchdog():
             with MODE_LOCK:
                 with DB_LOCK:
                     busy = places.any_running(DB())
-                if not busy or ROUTES.running() or store.read_mode()['mode'] != 'operate':
+                if not busy or ROUTES.running() or read_mode()['mode'] != 'operate':
                     wait = 5
                     continue
-                print(f'경로 실행기가 멈춰 있어 다시 시작합니다 (exit={ROUTES.status().get("exited")})', flush=True)
-                ROUTES.start(FLEET_PATH, fleet_db.DB_PATH)
+                log_event('WARN', 'routes', f'경로 실행기가 멈춰 있어 다시 시작합니다 (exit={ROUTES.status().get("exited")})')
+                ROUTES.start(fleet_db.DB_PATH)
                 wait = min(60, wait * 2)
         except Exception as e:  # noqa: BLE001
             print(f'경로 실행기 감시 오류: {e}', flush=True)
@@ -686,7 +755,7 @@ def guard_watchdog():
             with MODE_LOCK:
                 with DB_LOCK:
                     busy = roles.any_guard_active(DB())
-                if not busy or store.read_mode()['mode'] != 'operate':
+                if not busy or read_mode()['mode'] != 'operate':
                     if PATROL.running():
                         PATROL.stop()
                     wait = 5
@@ -694,7 +763,7 @@ def guard_watchdog():
                 if PATROL.running():
                     wait = 5
                     continue
-                print(f'경비 노드가 멈춰 있어 다시 시작합니다 (exit={PATROL.status().get("exited")})', flush=True)
+                log_event('WARN', 'patrol', f'경비 노드가 멈춰 있어 다시 시작합니다 (exit={PATROL.status().get("exited")})')
                 start_guard_node()
                 WATCHDOG['restarts'] += 1
                 WATCHDOG['last'] = time.time()
@@ -708,14 +777,14 @@ def start_guard_node():
     if not map_name:
         raise ValueError('활성 지도가 없습니다. 먼저 지도를 만들고 활성 지도로 지정하세요')
     if not PATROL.running():
-        PATROL.start(map_name, FLEET_PATH, fleet_db.DB_PATH)
+        PATROL.start(map_name, fleet_db.DB_PATH)
 
 
 def guard_action(robot_id, action):
     """경비 시작·재개(운영 모드·활성 지도, 노드를 띄움)·멈춤·정지"""
     with MODE_LOCK:
         if action in ('start', 'resume'):
-            mode = store.read_mode()['mode']
+            mode = read_mode()['mode']
             if mode != 'operate':
                 raise ValueError(f'운영 모드에서만 경비를 시작할 수 있습니다 (지금: {MODE_NAMES.get(mode, mode)})')
             if not read_fleet().get('mapFile'):
@@ -745,7 +814,7 @@ def obstacle_watchdog():
         time.sleep(1)
         try:
             with MODE_LOCK:
-                mode = store.read_mode()['mode']
+                mode = read_mode()['mode']
                 if mode == 'operate':
                     maybe_start_obstacle()
                 elif mode == 'obstacle' and not OBSTACLE.running():
@@ -790,9 +859,9 @@ def start_obstacle(alert, map_name, ex):
         run = O.start_run(con, alert, map_name, ex, resume)
     ROUTES.stop()
     PATROL.stop()
-    store.write_mode('obstacle', run=run['id'])
-    print(f'장애물 처리 #{run["id"]} 시작: 경보 #{alert["id"]} ({alert["x"]:.2f}, {alert["y"]:.2f}) → 출구 ({ex["x"]:.2f}, {ex["y"]:.2f}), '
-          f'로봇 {team}', flush=True)
+    write_mode('obstacle', f'경비가 지도에 없던 장애물 발견 (경보 #{alert["id"]})', run=run['id'])
+    log_event('WARN', 'obstacle', f'장애물 처리 #{run["id"]} 시작: 경보 #{alert["id"]} ({alert["x"]:.2f}, {alert["y"]:.2f}) → '
+                                  f'출구 ({ex["x"]:.2f}, {ex["y"]:.2f}), 로봇 {team}')
     try:
         if not team:
             raise ValueError('워커·경비 역할인 로봇이 없습니다')
@@ -816,7 +885,7 @@ def abort_obstacle(message):
 
 def finish_obstacle():
     """처리 노드가 끝난 뒤 (MODE_LOCK 안에서). 성공: 경보 처리 + 역할 다시 시작. 실패·중단: 역할은 멈춘 채"""
-    run_id = store.read_mode().get('run')
+    run_id = read_mode().get('run')
     with DB_LOCK:
         con = DB()
         run = O.get_run(con, run_id) if run_id else O.last_run(con)
@@ -832,7 +901,7 @@ def finish_obstacle():
                     store.set_status(con, run['alert_id'], 'ok', f'장애물 처리 #{run["id"]}: 로봇들이 출구로 옮김')
                 except KeyError:
                     pass
-            store.write_mode('operate')
+            write_mode('operate', f'장애물 처리 #{run["id"]} 끝')
             for rid in run['resume'].get('guards', []):
                 try:
                     roles.guard_control(con, rid, 'resume', f'장애물 처리 #{run["id"]} 끝 → 경비 재개')
@@ -849,13 +918,15 @@ def finish_obstacle():
             if resumed['guards']:
                 start_guard_node()
             if resumed['routes'] and not ROUTES.running():
-                ROUTES.start(FLEET_PATH, fleet_db.DB_PATH)
+                ROUTES.start(fleet_db.DB_PATH)
         except Exception as e:  # noqa: BLE001  감시 스레드들이 다시 시도함
             print(f'역할 다시 시작 중 오류 (감시 스레드가 다시 시도): {e}', flush=True)
     else:
-        store.write_mode('operate')   # 실패·중단: 역할은 멈춘 채 (관제실이 확인 후 재개), 경보는 열린 채
-    print(f'장애물 처리 #{run["id"] if run else "?"} 끝: {run["state"] if run else "기록 없음"} · '
-          f'다시 시작한 이동 경로 {resumed["routes"]}개, 경비 {resumed["guards"]}대', flush=True)
+        # 실패·중단: 역할은 멈춘 채 (관제실이 확인 후 재개), 경보는 열린 채
+        write_mode('operate', f'장애물 처리 #{run["id"] if run else "?"} {O.STATE_LABEL.get(run["state"], "") if run else "기록 없음"}')
+    log_event('INFO' if run and run['state'] == 'done' else 'WARN', 'obstacle',
+              f'장애물 처리 #{run["id"] if run else "?"} 끝: {O.STATE_LABEL.get(run["state"], run["state"]) if run else "기록 없음"} · '
+        f'다시 시작한 이동 경로 {resumed["routes"]}개, 경비 {resumed["guards"]}대')
 
 
 def set_robot_role(robot_id, role):
@@ -877,7 +948,7 @@ def set_mode(mode):
     if mode not in ('operate', 'mapping'):
         raise ValueError('모드는 operate | mapping (장애물 처리는 서버가 자동으로 바꿈)')
     with MODE_LOCK:
-        if store.read_mode()['mode'] == 'obstacle':
+        if read_mode()['mode'] == 'obstacle':
             raise ValueError('장애물 처리 중입니다. 먼저 중단하세요 (상단 배너의 중단 또는 전체 비상정지)')
         return _set_mode(mode)
 
@@ -891,7 +962,7 @@ def _set_mode(mode):
         PATROL.stop()
     else:
         MAPPING.stop()
-    store.write_mode(mode)
+    write_mode(mode, '사용자')
     return mode_status()
 
 
@@ -905,8 +976,8 @@ def main():
     # DB 파일(data/fleet.db)이 없으면 여기서 만듦. 있으면 스키마 버전을 확인해 필요하면 올림
     with DB_LOCK:
         con = DB()
-        places.sync_robots(con, read_fleet().get('robots', []))
         places.sync_maps(con, [m['name'] for m in maps.list_maps()])
+        imported = FS.import_files(con, lambda d: validate_fleet(d, set(FS.robot_types(con))), maps, store)
         # 서버를 다시 켜도 로봇이 혼자 경로를 이어 가지 않게: 실행 중이던 경로는 멈춤
         n = places.pause_all(con, '서버 재시작으로 멈춤 (경로 화면에서 이어서)')
         g = roles.pause_all_guards(con, '서버 재시작으로 멈춤 (역할 화면에서 재개)')   # 경비도 혼자 다시 출발하지 않게
@@ -918,22 +989,20 @@ def main():
     old = [f for f in ('places.db', 'alerts.db') if os.path.exists(os.path.join(os.path.dirname(fleet_db.DB_PATH), f))]
     if old:   # DB 를 하나로 합치기 전의 파일 (자동으로 옮기지 않음)
         print(f'참고: data/ 의 {", ".join(old)} (-wal, -shm, .bak-v* 포함)는 더 이상 쓰지 않습니다. 필요 없으면 지워도 됩니다', flush=True)
+    for line in imported:
+        print(f'파일 → DB: {line}', flush=True)
+    log_event('INFO', 'server', f'서버 시작 (DB 스키마 {ver})')
     if n or g:
-        print(f'실행 중이던 이동 경로 {n}개, 경비 {g}대를 멈춤 상태로 바꿨습니다', flush=True)
-    # 지도 만들기는 이어서 하지 않음. 예전 '경비 모드'(patrol) 파일도 운영으로 (경비는 이제 로봇 역할)
-    try:
-        with open(store.MODE_PATH, encoding='utf-8') as f:
-            saved_mode = json.load(f).get('mode')
-    except (OSError, ValueError):
-        saved_mode = 'operate'
-    if saved_mode != 'operate':
-        store.write_mode('operate')
+        log_event('WARN', 'server', f'서버 재시작: 실행 중이던 이동 경로 {n}개, 경비 {g}대를 멈춤 상태로 바꿨습니다')
+    # 지도 만들기·장애물 처리는 이어서 하지 않음 → 운영으로
+    if read_mode()['mode'] != 'operate':
+        write_mode('operate', '서버 재시작')
     threading.Thread(target=guard_watchdog, daemon=True).start()
     threading.Thread(target=obstacle_watchdog, daemon=True).start()
     threading.Thread(target=route_watchdog, daemon=True).start()
     handler = functools.partial(Handler, directory=a.dir)
     with http.server.ThreadingHTTPServer((a.bind, a.port), handler) as srv:
-        print(f'TB3 web: http://{a.bind}:{a.port}/ ({a.dir}), fleet: {FLEET_PATH}', flush=True)
+        print(f'TB3 web: http://{a.bind}:{a.port}/ ({a.dir}), DB: {fleet_db.DB_PATH}', flush=True)
         print(f'로봇 목록 저장용 관리자 토큰: {TOKEN_PATH} (또는 환경 변수 TB3_WEB_TOKEN)', flush=True)
         try:
             srv.serve_forever()

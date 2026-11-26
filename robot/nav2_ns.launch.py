@@ -16,7 +16,8 @@ Nav2 는 네임스페이스 모드에서 /tf 를 <ns>/tf 로 읽으므로, 로�
 
   map:=lab        → ros2-fleet-console/config/maps/lab.yaml (웹 '지도 작성'으로 저장한 이름) 또는 yaml 경로
   keepout:=auto   → config/masks/lab/<ns>.yaml 이 있으면 사용 (웹 '이동 구역'에서 저장하면 생김), keepout:=off 로 끔
-  robot_type:=auto → config/fleet.json 에서 네임스페이스로 로봇 종류를 찾음 (turtlebot3 | pinky). 못 찾으면 turtlebot3
+  robot_type:=auto → DB 로봇 목록에서 네임스페이스로 로봇 종류를 찾음 (turtlebot3 | pinky). 못 찾으면 turtlebot3
+                    costmap robot_radius 는 그 종류의 DB robot_types.nav_radius (로봇 등록 화면에서 바꿈)
   params_file:=auto → 종류별 기본 파일: TurtleBot3 config/nav2/burger.yaml, Pinky config/nav2/pinky.yaml
   stamped:=auto   → TurtleBot3 true (TwistStamped), Pinky false (Twist). true/false 로 직접 정할 수도 있음
 
@@ -37,7 +38,7 @@ from launch_ros.actions import Node
 
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..'))
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from nav2_params import keepout_topics, params_for_type, read_for_ns, rewrite_params, robot_for_ns, stamped_for_type  # noqa: E402
+from nav2_params import keepout_topics, nav_radius_for_type, params_for_type, read_for_ns, rewrite_params, robot_for_ns, stamped_for_type  # noqa: E402
 
 
 def resolve_map(arg):
@@ -55,7 +56,7 @@ def launch_setup(context):
     if rtype in ('', 'auto'):
         found = robot_for_ns(ns)
         rtype = (found or {}).get('type') or 'turtlebot3'
-        type_note = ' (fleet.json)' if found else ' (fleet.json 에 없어 기본값)'
+        type_note = ' (DB 로봇 목록)' if found else ' (로봇 목록에 없어 기본값)'
     stamped_arg = LaunchConfiguration('stamped').perform(context).strip().lower()
     stamped = stamped_for_type(rtype) if stamped_arg in ('', 'auto') else stamped_arg in ('true', '1')
     params_arg = LaunchConfiguration('params_file').perform(context).strip()
@@ -75,7 +76,8 @@ def launch_setup(context):
         mask = os.path.abspath(os.path.expanduser(keepout_arg))
 
     safety = read_for_ns(ns)   # 이 로봇의 LiDAR 안전 구역 (DB: 로봇별 덮어쓰기 > 플릿 기본값) → collision_monitor LidarStop·LidarSlow
-    params, changes = rewrite_params(params_src, prefix, stamped, bool(mask), ns, safety=safety)
+    nav_r = nav_radius_for_type(rtype)   # 로봇 종류의 Nav2 반지름 (DB robot_types)
+    params, changes = rewrite_params(params_src, prefix, stamped, bool(mask), ns, safety=safety, nav_radius=nav_r)
     info_topic, mask_topic = keepout_topics(ns)
     use_sim_time = LaunchConfiguration('use_sim_time').perform(context).lower() == 'true'
     shown = os.path.relpath(params_src, APP_DIR) if params_src.startswith(APP_DIR + os.sep) else params_src
@@ -118,7 +120,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='', description='로봇 네임스페이스 (tb3_01). 네임스페이스 없는 로봇은 생략'),
         DeclareLaunchArgument('frame_prefix', default_value='', description="TF 프레임 접두사 (TurtleBot3: 'tb3_01/', Pinky: '')"),
-        DeclareLaunchArgument('robot_type', default_value='auto', description='turtlebot3 | pinky | auto (config/fleet.json 에서 네임스페이스로 찾음)'),
+        DeclareLaunchArgument('robot_type', default_value='auto', description='turtlebot3 | pinky | auto (DB 로봇 목록에서 네임스페이스로 찾음)'),
         DeclareLaunchArgument('stamped', default_value='auto', description='cmd_vel 을 TwistStamped 로: auto (종류로: TurtleBot3 true, Pinky false) | true | false'),
         DeclareLaunchArgument('map', description='지도 이름(config/maps/<이름>.yaml) 또는 yaml 경로'),
         DeclareLaunchArgument('keepout', default_value='auto', description="이동 구역 마스크: auto | off | yaml 경로"),

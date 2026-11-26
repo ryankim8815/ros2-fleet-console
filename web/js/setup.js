@@ -1,4 +1,4 @@
-// 로봇 등록: fleet.json 편집 (추가·수정·삭제·순서), 네임스페이스 자동 검색, 연결 테스트
+// 로봇 등록: 로봇 목록 편집 (추가·수정·삭제·순서, DB robots), 로봇 종류 값 (DB robot_types), 네임스페이스 자동 검색, 연결 테스트
 window.App.ready.then((App) => {
   'use strict';
   const { ros, $, $$, esc, toast } = App;
@@ -75,6 +75,29 @@ window.App.ready.then((App) => {
       setTimeout(() => location.reload(), 600);
     } catch (e) { toast(`저장 실패: ${e.message}`, 'danger', 6000); }
   });
+
+  // ---------- 로봇 종류 값 (DB robot_types) ----------
+  const TYPE_FIELDS = [['label', 'text', 0], ['max_lin', 'number', 0.01], ['max_ang', 'number', 0.1], ['radius', 'number', 0.005],
+    ['nav_radius', 'number', 0.005], ['low_voltage', 'number', 0.1], ['volt_min', 'number', 0.1], ['volt_max', 'number', 0.1]];
+  function renderTypes() {
+    const types = App.fleet.types || {};
+    $('#type-rows').innerHTML = Object.entries(types).map(([t, v]) => `<tr data-type="${esc(t)}"><td class="mono">${esc(t)}</td>
+      ${TYPE_FIELDS.map(([k, kind, step]) => `<td><input type="${kind}" data-k="${k}" value="${esc(v[k])}" ${step ? `step="${step}"` : 'maxlength="40"'}
+        style="width: ${kind === 'text' ? 96 : 64}px; padding: 4px 6px" aria-label="${esc(t)} ${k}"></td>`).join('')}
+      <td><button class="btn btn-sm" data-save-type="${esc(t)}" style="white-space: nowrap">저장</button></td></tr>`).join('') || '<tr><td colspan="10" class="muted">서버에서 종류를 읽지 못했습니다</td></tr>';
+  }
+  $('#type-rows').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-save-type]'); if (!b) return;
+    const tr = b.closest('tr');
+    const body = {};
+    TYPE_FIELDS.forEach(([k, kind]) => { const v = tr.querySelector(`[data-k="${k}"]`).value; body[k] = kind === 'text' ? v : Number(v); });
+    try {
+      const saved = await App.adminJson(`/api/robot-types/${encodeURIComponent(b.dataset.saveType)}`, { method: 'PUT', body: JSON.stringify(body) });
+      App.fleet.types[b.dataset.saveType] = saved;
+      toast(`${saved.label}: 저장했습니다 (Nav2 반지름은 Nav2 를 다시 실행할 때 반영)`, 'ok', 4000);
+    } catch (err) { toast(`저장 실패: ${err.message}`, 'danger', 6000); }
+  });
+  renderTypes();
 
   const mapIn = $('#map-topic');
   mapIn.value = mapTopic;

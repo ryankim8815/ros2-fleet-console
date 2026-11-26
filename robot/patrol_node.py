@@ -10,7 +10,7 @@
      같은 칸이 연속 persist 번 이상 보이면 '확정', 확정 칸을 이어 붙인 덩어리가 min_area 이상이면 경보
   3) 경보: data/fleet.db 의 alerts·alert_robots 에 기록하고 /fleet/alerts (std_msgs/String JSON) 로 알림
      가까운 곳의 열린 경보가 있으면 새로 만들지 않고 갱신 (다른 로봇이 다시 보면 등급 올림)
-     출구 둘레(obstacle.EXIT_RADIUS)는 '새로 생긴 것'으로 보지 않음 (장애물 처리로 옮겨 둔 것)
+     출구 둘레(DB obstacle_settings.exit_radius)는 '새로 생긴 것'으로 보지 않음 (장애물 처리로 옮겨 둔 것)
   4) 장애물 대기: 경비 중에 '새로 생긴 것' 경보를 새로 만들면 그 자리에 멈추고(goal 취소) 경비 상태를 alarm 으로.
      활성 지도에 출구가 있으면 서버가 이것을 보고 '장애물 처리' 모드로 바꿈 (obstacle.py). 없으면 아래처럼 관제실을 기다림.
      기다리는 동안 alarm_interval 초마다 알림: TurtleBot3 부저(<ns>/sound, ERROR), Pinky LED 빨강 깜빡임·표정 angry
@@ -52,6 +52,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
 import coverage  # noqa: E402
 import dbutil  # noqa: E402
+import fleet_store  # noqa: E402
 import maps  # noqa: E402
 import obstacle  # noqa: E402
 import patrol_store as store  # noqa: E402
@@ -179,7 +180,7 @@ class RobotWatch:
         exit_xy = self.p.exit   # 출구 둘레는 '새로 생긴 것'으로 보지 않음 (옮겨 둔 장애물이 다시 경보가 되지 않게)
         for k in np.nonzero(ok | far)[0]:
             if ok[k]:
-                if exit_xy and (ex[k] - exit_xy[0]) ** 2 + (ey[k] - exit_xy[1]) ** 2 < obstacle.EXIT_RADIUS ** 2:
+                if exit_xy and (ex[k] - exit_xy[0]) ** 2 + (ey[k] - exit_xy[1]) ** 2 < self.p.exit_radius ** 2:
                     continue
                 i, j = B.cell(ex[k], ey[k])
                 if 0 <= i < B.w and 0 <= j < B.h and B.free[j, i] and not B.near[j, i]:
@@ -385,29 +386,26 @@ class PatrolNode(Node):
     def __init__(self):
         super().__init__('fleet_patrol')
         self.declare_parameter('map_name', '')
-        self.declare_parameter('fleet', '')
         self.declare_parameter('db', store.DB_PATH)
-        self.declare_parameter('config_dir', '')
         self.map_name = self.get_parameter('map_name').value
-        self.fleet_path = self.get_parameter('fleet').value
-        with open(self.fleet_path, encoding='utf-8') as f:
-            self.fleet = json.load(f)
-        self.fleet_mtime = os.path.getmtime(self.fleet_path)
         self.db_path = self.get_parameter('db').value
         self.con = store.db(self.db_path)
         self.db_lock = threading.Lock()
+        # 로봇 목록·종류(반지름), 경비 설정, 구역, 출구 둘레는 모두 DB 에서 (5초마다 다시 봄)
+        self.fleet = fleet_store.robots(self.con)
+        self.fleet_key = json.dumps(self.fleet, sort_keys=True)
+        self.radii = {t: v['radius'] for t, v in fleet_store.robot_types(self.con).items()}
         self.warned = set()
-        self.exit = None              # 활성 지도의 출구 (x, y) — 시작할 때와 5초마다 DB 에서
+        self.exit, self.exit_radius = None, 1.0   # 활성 지도의 출구 (x, y)·둘레 — 시작할 때와 5초마다 DB 에서
         self.load_exit()              # 스캔을 받기 전에 (장애물 처리 직후 다시 켜질 때 옮긴 장애물을 바로 보게 되므로)
         self.load_config()
         self.base = Baseline(self.map_name, self.settings['tol'])
         self.alert_pub = self.create_publisher(String, '/fleet/alerts', 10)
         self.status_pub = self.create_publisher(String, '/fleet/patrol_status', 10)
         self.create_subscription(String, '/fleet/patrol_cmd', self.on_cmd, 10)
-        self.robots = [RobotWatch(self, r) for r in self.fleet.get('robots', [])]
+        self.robots = [RobotWatch(self, r) for r in self.fleet]
         self.executor_ref = None        # main() 이 넣음: 로봇 목록에 새 로봇이 생기면 그 노드를 더함
         self.plan_key = None
-        self.zones_mtime = None
         self.create_timer(1.0, self.tick)
         self.create_timer(5.0, self.reload)
         self.last_report = {}
@@ -419,18 +417,20 @@ class PatrolNode(Node):
             self.get_logger().warn(msg)
 
     def load_exit(self):
-        """활성 지도의 출구 (장애물 처리로 옮겨 둔 장애물을 다시 경보로 만들지 않게). 시작할 때와 5초마다"""
+        """활성 지도의 출구와 그 둘레 (장애물 처리로 옮겨 둔 장애물을 다시 경보로 만들지 않게). 시작할 때와 5초마다"""
         with self.db_lock:
             try:
                 e = obstacle.get_exit(self.con, self.map_name)
                 self.exit = (e['x'], e['y']) if e else None
+                self.exit_radius = obstacle.get_settings(self.con)['exit_radius']
             except Exception:  # noqa: BLE001  (예전 DB 등)
-                self.exit = None
+                self.exit, self.exit_radius = None, 1.0
 
     def load_config(self):
-        self.settings = store.read_patrol(self.map_name)['settings']
-        p = os.path.join(store.PATROL_DIR, f'{self.map_name}.json')
-        self.cfg_mtime = os.path.getmtime(p) if os.path.exists(p) else 0
+        """경비 감지·순회 설정 (DB guard_settings, 지도마다)"""
+        with self.db_lock:
+            cfg = store.read_patrol(self.con, self.map_name)
+        self.settings, self.cfg_updated = cfg['settings'], cfg['updated']
 
     def reload(self):
         with self.db_lock:   # 실행 중 DB 파일이 지워졌으면 새 파일로 (지워진 파일에 경보를 쓰지 않게)
@@ -438,25 +438,24 @@ class PatrolNode(Node):
         if fresh:
             self.get_logger().warn('DB 파일(data/fleet.db)이 새로 만들어졌습니다')
         self.load_exit()
-        p = os.path.join(store.PATROL_DIR, f'{self.map_name}.json')
-        if os.path.exists(p) and os.path.getmtime(p) != self.cfg_mtime:
+        with self.db_lock:
+            updated = store.read_patrol(self.con, self.map_name)['updated']
+            fleet = fleet_store.robots(self.con)
+            self.radii = {t: v['radius'] for t, v in fleet_store.robot_types(self.con).items()}
+        if updated != self.cfg_updated:
             self.load_config()
             self.get_logger().info('감지·순회 설정 다시 읽음')
-        try:   # 로봇 목록에 새로 등록된 로봇
-            if os.path.getmtime(self.fleet_path) != self.fleet_mtime:
-                with open(self.fleet_path, encoding='utf-8') as f:
-                    self.fleet = json.load(f)
-                self.fleet_mtime = os.path.getmtime(self.fleet_path)
-                have = {r.id for r in self.robots}
-                for cfg in self.fleet.get('robots', []):
-                    if cfg['id'] not in have:
-                        r = RobotWatch(self, cfg)
-                        self.robots.append(r)
-                        if self.executor_ref is not None:
-                            self.executor_ref.add_node(r.node)
-                        self.get_logger().info(f'새 로봇: {r.name}')
-        except (OSError, ValueError) as e:
-            self.get_logger().warn(f'로봇 목록 다시 읽기 실패: {e}')
+        key = json.dumps(fleet, sort_keys=True)
+        if key != self.fleet_key:   # 로봇 목록에 새로 등록된 로봇
+            self.fleet_key = key
+            have = {r.id for r in self.robots}
+            for cfg in fleet:
+                if cfg['id'] not in have:
+                    r = RobotWatch(self, cfg)
+                    self.robots.append(r)
+                    if self.executor_ref is not None:
+                        self.executor_ref.add_node(r.node)
+                    self.get_logger().info(f'새 로봇: {r.name}')
         try:
             info = maps.map_info(self.map_name)
             if max(os.path.getmtime(info['yaml']), os.path.getmtime(info['image'])) != self.base.mtime:
@@ -469,17 +468,20 @@ class PatrolNode(Node):
             self.get_logger().warn(f'기준 지도 확인 실패: {e}')
 
     def zones_key(self):
-        p = os.path.join(maps.ZONES_DIR, f'{self.map_name}.json')
-        return os.path.getmtime(p) if os.path.exists(p) else 0
+        """구역이 바뀌었는지 (DB: 마지막 바뀐 시각, 개수)"""
+        with self.db_lock:
+            return maps.zones_updated(self.con, self.map_name)
 
     def replan(self):
         """경비 중·대기 중인 로봇들의 순회 지점. 로봇 구성·지도·구역·간격이 바뀌었을 때만 다시 계산"""
         active = [r for r in self.robots if r.watching]
-        key = (tuple(r.id for r in active), self.base.mtime, self.zones_key(), self.settings['spacing'])
+        key = (tuple(r.id for r in active), self.base.mtime, self.zones_key(), self.settings['spacing'],
+               tuple(sorted(self.radii.items())))
         if key == self.plan_key:
             return
         # 지도 위 위치를 아직 모르는 로봇이 있으면(초기 위치 전) 기다림 — 위치를 알아야 이어진 영역을 고름
-        guards = [{'id': r.id, 'type': r.cfg.get('type'), 'pose': r.pose_xy()} for r in active]
+        guards = [{'id': r.id, 'type': r.cfg.get('type'), 'radius': self.radii.get(r.cfg.get('type')), 'pose': r.pose_xy()}
+                  for r in active]
         if any(g['pose'] is None for g in guards):
             for r in active:
                 if r.pose_xy() is None:
@@ -487,7 +489,9 @@ class PatrolNode(Node):
             return
         t0 = time.time()
         try:
-            plan = coverage.plan(self.map_name, guards, self.settings['spacing'])
+            with self.db_lock:
+                zones = maps.read_zones(self.con, self.map_name)['zones']
+            plan = coverage.plan(self.map_name, guards, self.settings['spacing'], zones)
         except Exception as e:  # noqa: BLE001
             self.get_logger().error(f'순회 지점 계산 실패: {e}')
             return

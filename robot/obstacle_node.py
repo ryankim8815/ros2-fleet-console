@@ -10,7 +10,9 @@
             → 출구에 닿았으면 끝, 아니면 잰 위치에서 길·자리를 다시 계획해 반복
             (밀다가 장애물이 옆으로 미끄러져도 다음 구간에서 바로잡음. LDS-02 는 0.16 m 안을 못 보므로 닿은 채로는 못 잼)
   4. 소리  : 출구에 있는 것을 잰 뒤 5초
-진행은 data/fleet.db 의 obstacle_runs 에 씀 (웹이 읽음). 끝나면 종료 → 서버가 역할을 다시 시작.
+진행은 data/fleet.db 의 obstacle_runs 에, 단계·구간마다 잰 위치는 obstacle_run_events 에 씀 (웹이 읽음).
+값(모일 간격, 미는 속도, 구간 길이, 도착 허용 …)은 DB obstacle_settings, 로봇 반지름은 robot_types, 구역은 zones 에서 읽음.
+끝나면 종료 → 서버가 역할을 다시 시작.
 
 멈춤: SIGINT/SIGTERM(서버의 중단·비상정지) 또는 /fleet/obstacle_cmd {"cmd": "abort"} → 모든 로봇 정지, 'aborted'.
 실패: 자리에 못 감, 위치를 잃음, 길에서 0.35 m 넘게 벗어남, 장애물을 다시 못 찾음, 두 구간 밀어도 장애물이 안 움직임,
@@ -46,6 +48,7 @@ from turtlebot3_msgs.srv import Sound
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..')))
 import coverage  # noqa: E402
+import fleet_store  # noqa: E402
 import maps  # noqa: E402
 import obstacle as O  # noqa: E402
 import patrol_store as store  # noqa: E402
@@ -55,10 +58,10 @@ try:   # Pinky LED·표정 (ros2_ws 에 pinky_interfaces 를 빌드했을 때만
 except ImportError:
     Emotion = SetLed = None
 
-GATHER_TIMEOUT = 180.0     # Nav2 로 자리까지 가는 시간 한도 (초)
+# 현장에서 맞추는 값은 DB obstacle_settings (self.S): standoff, robot_gap, push_speed, approach_speed, segment, exit_tol,
+# exit_radius, max_segments, gather_timeout, max_deviation. 아래는 맞출 일이 거의 없는 제어 값
 ALIGN_TIMEOUT = 30.0       # 자리 정밀 맞춤 한도 (초)
 POSE_LOST = 1.5            # 위치를 이만큼 못 받으면 멈춤 (초)
-MAX_DEVIATION = 0.35       # 밀다가 자기 길에서 이만큼 벗어나면 실패 (m)
 LOOKAHEAD = 0.25           # 길 따라가기 앞보기 거리 (m)
 EXTEND = 1.5               # 장애물 뒤로 늘인 길 (로봇이 장애물 뒤에서 시작하므로)
 RENAV = 0.35               # 다시 잰 뒤 새 자리까지 이보다 멀면 Nav2 로 (가까우면 직접 맞춤)
@@ -83,7 +86,7 @@ def wrap(a):
 class Bot:
     """로봇 한 대: 위치(TF), LiDAR, Nav2 goal, cmd_vel, 소리·LED"""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, radius):
         self.cfg = cfg
         self.id, self.name, self.ns = cfg['id'], cfg['name'], cfg.get('ns', '')
         self.prefix = cfg.get('tfPrefix', '')
@@ -100,7 +103,7 @@ class Bot:
         pinky = cfg.get('type') == 'pinky'
         self.led = self.node.create_client(SetLed, f'{self.ns}/set_led') if pinky and SetLed else None
         self.emotion = self.node.create_client(Emotion, f'{self.ns}/set_emotion') if pinky and Emotion else None
-        self.radius = maps.ROBOT_RADIUS.get(cfg.get('type'), 0.105)
+        self.radius = radius                     # 몸체 반지름 (DB robot_types)
         self.goal = None
         self.slot = None
         self.state = 'waiting'
@@ -206,8 +209,11 @@ class Handler(Node):
         self.run = O.get_run(self.con, self.run_id)
         if self.run is None:
             raise RuntimeError(f'장애물 처리 기록 #{self.run_id} 가 없습니다')
+        self.S = O.get_settings(self.con)            # 장애물 처리 값 (DB obstacle_settings)
+        types = fleet_store.robot_types(self.con)
+        rad = lambda t: (types.get(t) or types.get('turtlebot3') or {'radius': 0.105})['radius']   # noqa: E731
         with open(self.get_parameter('robots_file').value, encoding='utf-8') as f:
-            self.bots = [Bot(c) for c in json.load(f)]
+            self.bots = [Bot(c, rad(c.get('type'))) for c in json.load(f)]
         self.stop_evt = threading.Event()
         self.create_subscription(String, '/fleet/obstacle_cmd', self.on_cmd, 10)
         self.ob = dict(self.run['obstacle'])            # 지금 알고 있는 장애물 {x, y, r}
@@ -218,7 +224,7 @@ class Handler(Node):
         # 기준 지도의 벽 근처 (장애물을 잴 때 벽 점을 빼려고)
         self.info, occ, _ = coverage.load_grid(self.run['map'])
         self.near_wall = coverage.disk_dilate(occ, 0.10 / self.info['resolution'])
-        zones = maps.read_zones(self.run['map']).get('zones', [])
+        zones = maps.read_zones(self.con, self.run['map'])['zones']
         self.forbidden = coverage.forbidden_grid(self.info, zones, '*')
 
     def on_cmd(self, msg):
@@ -246,6 +252,9 @@ class Handler(Node):
                 self.plan['robots'][b.id].update({'state': b.state, 'pose': [round(p[0], 3), round(p[1], 3), round(p[2], 3)] if p else None})
         with self.db_lock:
             O.update_run(self.con, self.run_id, state=state, message=message, progress=progress, plan=self.plan)
+            if message:   # 이력 (obstacle_run_events)
+                O.add_event(self.con, self.run_id, 'state' if state else 'progress', message,
+                            {'state': state, 'segment': self.plan.get('segment'), 'robots': [b.id for b in self.bots]})
         if message:
             self.log(message)
 
@@ -292,15 +301,16 @@ class Handler(Node):
     def plan_slots(self):
         """지금 장애물 위치에서 출구까지 밀 길과 로봇 자리"""
         ob, ex = self.ob, self.exit
-        team = [{'id': b.id, 'type': b.cfg.get('type'), 'pose': b.pose()[:2] if b.pose() else None} for b in self.bots]
-        guess = O.formation(ob, [[ob['x'], ob['y']], [ex['x'], ex['y']]], team)
+        team = [{'id': b.id, 'type': b.cfg.get('type'), 'radius': b.radius, 'pose': b.pose()[:2] if b.pose() else None}
+                for b in self.bots]
+        guess = O.formation(ob, [[ob['x'], ob['y']], [ex['x'], ex['y']]], team, self.S)
         front = [s for s in guess.values() if s['row'] == 'front']
         half_w = max(abs(s['lat']) for s in front) + max(s['radius'] for s in front)
         try:
             path = O.plan_push_path(self.run['map'], (ob['x'], ob['y']), (ex['x'], ex['y']), max(ob['r'], half_w) + 0.05, self.forbidden)
         except ValueError as e:
             raise Fail(str(e)) from e
-        slots = O.formation(ob, path, team)
+        slots = O.formation(ob, path, team, self.S)
         robots = {k: {**dict(v), 'state': self.plan['robots'].get(k, {}).get('state', 'waiting')} for k, v in slots.items()}
         self.plan.update({'path': path, 'length': round(O.path_length(path), 3), 'robots': robots,
                           'est': {'x': ob['x'], 'y': ob['y']}, 'obstacle': dict(ob)})
@@ -328,12 +338,12 @@ class Handler(Node):
                     b.state = 'aligning' if b.goal['done'] else 'failed'
                     if not b.goal['done']:
                         self.log(f'{b.name}: 자리에 가지 못함 (Nav2 실패·거부)')
-            if time.time() - t0 > GATHER_TIMEOUT:
+            if time.time() - t0 > self.S['gather_timeout']:
                 for b in sent:
                     if b.state == 'going':
                         b.cancel()
                         b.state = 'failed'
-                        self.log(f'{b.name}: {GATHER_TIMEOUT:.0f}초 안에 자리에 못 감')
+                        self.log(f'{b.name}: {self.S["gather_timeout"]:.0f}초 안에 자리에 못 감')
             self.write()
         self.align([b for b in self.bots if b.state == 'aligning'])
         lost = [b for b in self.bots if b.state != 'ready']
@@ -345,7 +355,7 @@ class Handler(Node):
         if not any(b.slot['row'] == 'front' for b in self.bots):
             # 앞줄이 하나도 못 왔으면 뒷줄 중 가운데 로봇을 앞줄로 올리고 그 자리로 다시 맞춤
             b = min(self.bots, key=lambda q: abs(q.slot['lat']))
-            back = self.ob['r'] + b.radius + O.STANDOFF
+            back = self.ob['r'] + b.radius + self.S['standoff']
             th = b.slot['th']
             b.slot.update({'row': 'front', 'lat': 0.0, 'x': self.ob['x'] - math.cos(th) * back, 'y': self.ob['y'] - math.sin(th) * back})
             self.plan['robots'][b.id].update(b.slot)
@@ -437,19 +447,19 @@ class Handler(Node):
         th0 = O.heading_at_start(path)
         ext = [[path[0][0] - math.cos(th0) * EXTEND, path[0][1] - math.sin(th0) * EXTEND]] + path
         L = O.path_length(path)
-        goal = min(L - O.EXIT_TOL * 0.5, O.SEGMENT)        # 이번에 밀 거리 (마지막 구간은 출구 바로 앞까지)
+        goal = min(L - self.S['exit_tol'] * 0.5, self.S['segment'])        # 이번에 밀 거리 (마지막 구간은 출구 바로 앞까지)
         ds = 0.05
         dense = O.resample(path, ds)
-        self.drive_straight(O.STANDOFF + 0.02, O.APPROACH_SPEED, 'approaching')
+        self.drive_straight(self.S['standoff'] + 0.02, self.S['approach_speed'], 'approaching')
         for b in self.bots:
             b.ref = O.offset_path(ext, b.slot['lat'])
             # 닿았을 때 장애물 중심과 로봇 중심 사이 (앞줄), 뒷줄은 앞줄 뒤 간격 유지
-            b.gap = ob['r'] + b.radius + (0 if b.slot['row'] == 'front' else 2 * b.radius + O.ROBOT_GAP + 0.10)
+            b.gap = ob['r'] + b.radius + (0 if b.slot['row'] == 'front' else 2 * b.radius + self.S['robot_gap'] + 0.10)
             b.idx = O.project(b.ref, *b.pose()[:2])
             b.state = 'pushing'
         front = [b for b in self.bots if b.slot['row'] == 'front']
         t0 = time.time()
-        limit = goal / O.PUSH_SPEED * 2 + 30
+        limit = goal / self.S['push_speed'] * 2 + 30
         last_pose = {b.id: time.time() for b in self.bots}
         S = 0.0
         while True:
@@ -465,8 +475,8 @@ class Handler(Node):
                 poses[b.id] = p
                 b.idx = O.project(b.ref, p[0], p[1], hint=b.idx, window=40)
                 rx, ry = b.ref[b.idx]
-                if math.hypot(p[0] - rx, p[1] - ry) > MAX_DEVIATION:
-                    raise Fail(f'{b.name}: 밀 길에서 {MAX_DEVIATION} m 넘게 벗어남')
+                if math.hypot(p[0] - rx, p[1] - ry) > self.S['max_deviation']:
+                    raise Fail(f'{b.name}: 밀 길에서 {self.S["max_deviation"]} m 넘게 벗어남')
                 prog[b.id] = b.idx * ds - EXTEND + b.gap     # 이 로봇 기준 장애물 중심이 길에서 간 거리
             if not poses:
                 self.sleep(0.1)
@@ -485,7 +495,7 @@ class Handler(Node):
                     continue
                 p = poses[b.id]
                 ahead = prog[b.id] - S                     # 앞서 간 만큼 늦춤 (대형 유지)
-                v = O.PUSH_SPEED * max(0.2, min(1.0, 1.0 - 5.0 * ahead))
+                v = self.S['push_speed'] * max(0.2, min(1.0, 1.0 - 5.0 * ahead))
                 tx, ty = b.ref[min(len(b.ref) - 1, b.idx + int(LOOKAHEAD / ds))]
                 alpha = wrap(math.atan2(ty - p[1], tx - p[0]) - p[2])
                 if abs(alpha) > 1.0:
@@ -496,7 +506,7 @@ class Handler(Node):
             self.sleep(0.1)
         self.halt_all()
         # 물러나서 LiDAR 로 볼 수 있게 (LDS-02 는 0.16 m 안을 못 봄)
-        self.drive_straight(-O.STANDOFF, 0.05, 'backing')
+        self.drive_straight(-self.S['standoff'], 0.05, 'backing')
         return (est[0], est[1]), L - S
 
     # ---------------- 전체 ----------------
@@ -516,6 +526,9 @@ class Handler(Node):
         if m:
             self.ob = {'x': m['x'], 'y': m['y'], 'r': m['r']}
             self.log(f'장애물을 다시 잼: ({m["x"]:.2f}, {m["y"]:.2f}) r {m["r"]:.2f} ({m["fit"]}, 점 {m["n"]}개)')
+            with self.db_lock:
+                O.add_event(self.con, self.run_id, 'measure', f'처음 잰 장애물 ({m["x"]:.2f}, {m["y"]:.2f}) r {m["r"]:.2f}',
+                            {'segment': 0, **{k: m[k] for k in ('x', 'y', 'r', 'n', 'fit')}})
         # 1. 모이기
         self.plan_slots()
         self.write(message=f'로봇 {len(self.bots)}대가 장애물 뒤로 모이는 중 (밀 길 {self.plan["length"]:.1f} m)', force=True)
@@ -530,7 +543,7 @@ class Handler(Node):
         self.signal('signal1', 'gather', f'로봇 {n}대가 모두 모였습니다 · {O.SIGNAL_SECONDS:.0f}초 동안 소리')
         # 3. 구간마다 밀고 → 물러나 재고 → 다시 계획
         still = 0
-        for seg in range(1, O.MAX_SEGMENTS + 1):
+        for seg in range(1, self.S['max_segments'] + 1):
             self.plan['segment'] = seg
             path = self.plan['path']
             self.write(state='pushing', message=f'{seg}번째 구간 미는 중 (남은 길 {self.plan["length"]:.1f} m)', force=True)
@@ -542,7 +555,12 @@ class Handler(Node):
             self.ob = {'x': m['x'], 'y': m['y'], 'r': m['r']}
             d_exit = math.hypot(m['x'] - ex['x'], m['y'] - ex['y'])
             self.log(f'{seg}번째 구간 뒤 장애물 ({m["x"]:.2f}, {m["y"]:.2f}) · {moved:.2f} m 움직임 · 출구까지 {d_exit:.2f} m')
-            if d_exit <= O.EXIT_TOL:
+            with self.db_lock:
+                O.add_event(self.con, self.run_id, 'measure', f'{seg}번째 구간 뒤 장애물 ({m["x"]:.2f}, {m["y"]:.2f}) · '
+                            f'{moved:.2f} m 움직임 · 출구까지 {d_exit:.2f} m',
+                            {'segment': seg, 'x': m['x'], 'y': m['y'], 'r': m['r'], 'fit': m['fit'], 'moved': round(moved, 3),
+                             'to_exit': round(d_exit, 3)})
+            if d_exit <= self.S['exit_tol']:
                 break
             still = still + 1 if moved < 0.08 else 0
             if still >= 2:
@@ -551,7 +569,7 @@ class Handler(Node):
             self.write(progress=self.progress(self.plan['length']), message=f'자리 고치는 중 (장애물이 {moved:.2f} m 움직임)', force=True)
             self.go_to_slots(nav_all=False)
         else:
-            raise Fail(f'{O.MAX_SEGMENTS}구간을 밀어도 출구에 닿지 못했습니다')
+            raise Fail(f'{self.S["max_segments"]}구간을 밀어도 출구에 닿지 못했습니다')
         self.plan['est'] = {'x': self.ob['x'], 'y': self.ob['y']}
         for b in self.bots:
             b.state = 'done'

@@ -86,25 +86,6 @@ def sync_maps(con, names):
             ensure_map(con, n)
 
 
-def sync_robots(con, robots):
-    """config/fleet.json 의 로봇 목록과 맞춤: 있는 로봇은 active = 1, 빠진 로봇은 active = 0 (이력 때문에 지우지 않음)"""
-    now = time.time()
-    ids = []
-    with con:
-        for r in robots:
-            if not ROBOT_RE.match(str(r.get('id', ''))):
-                continue
-            ids.append(r['id'])
-            con.execute('INSERT INTO robots (id, name, ns, type, active, updated_at) VALUES (?,?,?,?,1,?) '
-                        'ON CONFLICT(id) DO UPDATE SET name = excluded.name, ns = excluded.ns, type = excluded.type, '
-                        'active = 1, updated_at = excluded.updated_at',
-                        (r['id'], str(r.get('name', ''))[:40], str(r.get('ns', '')), str(r.get('type', '')), now))
-        q = 'UPDATE robots SET active = 0, updated_at = ? WHERE active = 1'
-        if ids:
-            q += f' AND id NOT IN ({",".join("?" * len(ids))})'
-        con.execute(q, (now, *ids))
-
-
 def _robot_active(con, robot_id):
     r = con.execute('SELECT active FROM robots WHERE id = ?', (robot_id,)).fetchone()
     return bool(r and r['active'])
@@ -411,7 +392,7 @@ def control_assignment(con, robot_id, action, active_map=None):
     run = _run(con, cur['current_run_id'])
     if action in ('start', 'resume'):
         if not a['robot_active']:
-            raise ValueError('로봇 목록(fleet.json)에서 빠진 로봇입니다')
+            raise ValueError('로봇 목록에서 빠진 로봇입니다')
         if a['map'] != active_map:
             raise ValueError(f'경로의 지도({a["map"]})가 활성 지도({active_map or "없음"})가 아닙니다. 로봇은 활성 지도에서 위치를 잡습니다')
         if not a['points']:

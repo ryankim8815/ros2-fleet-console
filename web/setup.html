@@ -37,7 +37,7 @@
       <section class="panel">
         <div class="panel-head">
           <h1 style="font-size: 17px">등록된 로봇</h1>
-          <span class="muted" style="font-size: 12px">ros2-fleet-console/config/fleet.json · 모든 로봇이 같은 ROS_DOMAIN_ID, rosbridge 하나</span>
+          <span class="muted" style="font-size: 12px">DB (data/fleet.db 의 robots) · 모든 로봇이 같은 ROS_DOMAIN_ID, rosbridge 하나</span>
           <div class="spacer"></div>
           <button class="btn" id="discover">네임스페이스 자동 검색</button>
           <button class="btn btn-primary" id="save" disabled>저장</button>
@@ -51,6 +51,18 @@
         <label class="field" style="max-width: 360px">공유 지도 토픽 <input id="map-topic" class="mono" pattern="/[A-Za-z][A-Za-z0-9_\/]*" placeholder="/map"></label>
         <div class="muted" style="font-size: 12px">로봇별 Nav2(nav2_ns.launch.py)를 쓰면 지도가 &lt;ns&gt;/map 으로 나오므로 그중 하나(예: /tb3_01/map)를 적습니다.</div>
         <div class="muted" style="font-size: 12px" id="dirty-note"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="types-title">
+        <div class="panel-head"><h2 id="types-title">로봇 종류 값</h2>
+          <span class="muted" style="font-size: 12px">웹 수동 조종 최대 속도, 구역 판정·경비 순회·장애물 처리에 쓰는 몸체 반지름, Nav2 costmap 반지름, 배터리 전압 (DB robot_types)</span></div>
+        <div class="table-wrap">
+          <table class="t" id="types-table">
+            <thead><tr><th>종류</th><th>이름</th><th>최대 m/s</th><th>최대 rad/s</th><th>몸체 반지름 m</th><th>Nav2 반지름 m</th><th>저전압 V</th><th>0% V</th><th>100% V</th><th></th></tr></thead>
+            <tbody id="type-rows"></tbody>
+          </table>
+        </div>
+        <div class="muted" style="font-size: 12px">Nav2 반지름은 그 로봇의 Nav2 를 다시 실행할 때, 나머지는 화면을 새로 고치면 반영됩니다. 구역 마스크는 구역을 다시 저장하면 새 반지름으로 만들어집니다.</div>
       </section>
 
       <section class="panel hidden" id="found-panel">

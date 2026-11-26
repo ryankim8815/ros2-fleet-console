@@ -439,6 +439,21 @@ window.App.ready.then((App) => {
     event(r || null, LV[l.level] || 'WARN', `[${l.name}] ${l.msg}`, d.toTimeString().slice(0, 8));
   }, { queue: 50 });
 
+  // 서버 운영 이벤트 (DB events: 프로세스 재시작, 모드, 장애물 처리, 역할 종류 값 …) — 새로 고쳐도 남음
+  let evSince = 0;
+  async function loadServerEvents(first) {
+    try {
+      const r = await (await fetch(`/api/events?since=${evSince}&limit=${first ? 30 : 100}`, { cache: 'no-store' })).json();
+      for (const e of (r.events || []).slice().reverse()) {
+        evSince = Math.max(evSince, e.id);
+        const rb = e.robot_id ? robots.find((x) => x.id === e.robot_id) || null : null;
+        event(rb, e.level, `[서버·${e.source}] ${e.message}`, new Date(e.t * 1000).toTimeString().slice(0, 8));
+      }
+    } catch (err) { /* 서버 없이 열었을 때 */ }
+  }
+  loadServerEvents(true);
+  setInterval(loadServerEvents, 5000);
+
   function watchStates() {
     robots.forEach((r) => {
       const x = extra.get(r.id);

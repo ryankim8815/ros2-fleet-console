@@ -23,7 +23,6 @@ import time
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(APP_DIR, 'config')
 MAPS_DIR = os.path.join(CONFIG, 'maps')
-ZONES_DIR = os.path.join(CONFIG, 'zones')
 MASKS_DIR = os.path.join(CONFIG, 'masks')
 LOG_DIR = os.path.join(APP_DIR, 'logs')
 COOP_LAUNCH = os.path.join(APP_DIR, 'robot', 'coop_mapping.launch.py')
@@ -90,7 +89,8 @@ def map_info(name):
     }
 
 
-def list_maps():
+def list_maps(zone_maps=()):
+    """저장된 지도 목록. zone_maps: 이동 구역이 있는 지도 이름들 (DB, serve 가 넘김)"""
     out = []
     if os.path.isdir(MAPS_DIR):
         for fn in sorted(os.listdir(MAPS_DIR)):
@@ -98,7 +98,7 @@ def list_maps():
                 try:
                     info = map_info(fn[:-5])
                     info = {k: v for k, v in info.items() if k not in ('yaml', 'image')}
-                    info['zones'] = os.path.exists(os.path.join(ZONES_DIR, f'{info["name"]}.json'))
+                    info['zones'] = info['name'] in zone_maps
                     out.append(info)
                 except Exception as e:  # 깨진 파일은 건너뜀
                     out.append({'name': fn[:-5], 'error': str(e)})
@@ -171,14 +171,47 @@ def apply_to_baseline(name, kind, x, y, w, h):
 
 
 # ------------------------------------------------------------------ 구역
-def read_zones(name):
+def read_zones(con, name):
+    """그 지도의 이동 구역 {map, zones: [{id, name, type, robots: ['*'] | [id..], points: [[x, y]..]}], updated}
+    (DB: zones, zone_points, zone_robots — fleet_db v4. 예전 config/zones/<지도>.json)"""
     if not NAME_RE.match(name):
         raise ValueError('지도 이름 형식이 올바르지 않습니다')
-    try:
-        with open(os.path.join(ZONES_DIR, f'{name}.json'), encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {'map': name, 'zones': []}
+    out, updated = [], 0.0
+    for z in con.execute('SELECT * FROM zones WHERE map = ? ORDER BY sort, id', (name,)).fetchall():
+        pts = [[p['x'], p['y']] for p in con.execute('SELECT x, y FROM zone_points WHERE map = ? AND zone_id = ? ORDER BY seq', (name, z['id']))]
+        robots = ['*'] if z['all_robots'] else [r[0] for r in con.execute(
+            'SELECT robot_id FROM zone_robots WHERE map = ? AND zone_id = ? ORDER BY robot_id', (name, z['id']))]
+        out.append({'id': z['id'], 'name': z['name'], 'type': z['type'], 'robots': robots or ['*'], 'points': pts})
+        updated = max(updated, z['updated_at'])
+    return {'map': name, 'zones': out, 'updated': updated}
+
+
+def zones_updated(con, name):
+    """그 지도 구역이 마지막으로 바뀐 시각 (없으면 0) — 경비 노드가 순회 지점을 다시 계산할지 볼 때"""
+    r = con.execute('SELECT MAX(updated_at), COUNT(*) FROM zones WHERE map = ?', (name,)).fetchone()
+    return (r[0] or 0.0, r[1])
+
+
+def zone_maps(con):
+    return {r[0] for r in con.execute('SELECT DISTINCT map FROM zones')}
+
+
+def save_zones(con, name, clean):
+    """검사한 구역(validate_zones 결과)으로 그 지도의 구역을 통째로 바꿈"""
+    now = time.time()
+    with con:
+        con.execute('INSERT OR IGNORE INTO maps (name, created_at) VALUES (?, ?)', (name, now))
+        con.execute('DELETE FROM zones WHERE map = ?', (name,))   # 점·로봇은 CASCADE
+        for k, z in enumerate(clean['zones']):
+            allr = '*' in z['robots']
+            con.execute('INSERT INTO zones (map, id, name, type, all_robots, sort, updated_at) VALUES (?,?,?,?,?,?,?)',
+                        (name, z['id'], z['name'], z['type'], 1 if allr else 0, k, now))
+            con.executemany('INSERT INTO zone_points (map, zone_id, seq, x, y) VALUES (?,?,?,?,?)',
+                            [(name, z['id'], i, x, y) for i, (x, y) in enumerate(z['points'])])
+            if not allr:
+                con.executemany('INSERT INTO zone_robots (map, zone_id, robot_id) VALUES (?,?,?)',
+                                [(name, z['id'], r) for r in z['robots']])
+    return read_zones(con, name)
 
 
 def validate_zones(name, data, robot_ids):
@@ -238,7 +271,7 @@ def _fill_polygon(grid, w, h, info, pts, value):
 # (경로가 넓힌 경계에 다시 붙음). 그래서 마스크에 inflation 과 같은 '비용 띠'를 넣습니다:
 #   구역 안 = 통과 불가(100), 로봇 반지름 이내 = 매우 높은 비용(99), 그 밖 BAND 거리까지 점점 낮아지는 비용.
 # KeepoutFilter 는 중간 값을 중간 비용으로 씁니다 (mode: scale).
-ROBOT_RADIUS = {'turtlebot3': 0.105, 'pinky': 0.07}
+ROBOT_RADIUS = {'turtlebot3': 0.105, 'pinky': 0.07}   # DB robot_types 가 없을 때(v4 전) 쓰는 기본값
 COST_BAND = 0.35      # 반지름 밖 비용이 남는 거리 (m)
 
 
@@ -267,7 +300,7 @@ def _cost_band(lethal, res, radius):
     return occ
 
 
-def build_masks(name, zones, robots):
+def build_masks(name, zones, robots, radii=None):
     """로봇마다 keepout 마스크(pgm+yaml, mode scale) 생성. robots: fleet robots 목록. 반환: {robot_id: {...}}"""
     import numpy as np
     info = map_info(name)
@@ -285,7 +318,7 @@ def build_masks(name, zones, robots):
         for z in mine:
             if z['type'] == 'keepout':
                 _fill_polygon(grid, w, h, info, z['points'], LETHAL)
-        radius = ROBOT_RADIUS.get(r.get('type'), 0.105)
+        radius = (radii or {}).get(r.get('type')) or ROBOT_RADIUS.get(r.get('type'), 0.105)   # DB robot_types 의 몸체 반지름
         lethal = np.frombuffer(bytes(grid), dtype=np.uint8).reshape(h, w) == LETHAL
         occ = _cost_band(lethal, info['resolution'], radius) if mine else np.zeros((h, w))
         # scale 모드: p = (255 - 픽셀)/255, p ≥ 0.99 → 100, 그 아래는 100·p 에 비례
@@ -303,12 +336,11 @@ def build_masks(name, zones, robots):
     return made
 
 
-def write_zones(name, data, robots):
-    clean = validate_zones(name, data, {r['id'] for r in robots})
-    map_info(name)  # 지도가 있어야 함
-    _atomic_write(os.path.join(ZONES_DIR, f'{name}.json'), json.dumps(clean, ensure_ascii=False, indent=2) + '\n')
-    masks = build_masks(name, clean['zones'], robots)
-    return clean, masks
+def write_zones(con, name, data, robots, radii=None):
+    """구역 저장(DB) + 로봇별 keepout 마스크 생성 (파일: Nav2 가 읽음). robots: 등록 로봇 목록, radii: {종류: 몸체 반지름}"""
+    map_info(name)
+    clean = save_zones(con, name, validate_zones(name, data, [r['id'] for r in robots]))
+    return clean, build_masks(name, clean['zones'], robots, radii)
 
 
 # ------------------------------------------------------------------ 백그라운드 프로세스 (지도 만들기, 경비)
@@ -412,12 +444,11 @@ class Patrol(_Proc):
     def __init__(self):
         super().__init__('patrol.log')
 
-    def start(self, map_name, fleet_path, db_path):
+    def start(self, map_name, db_path):
         import sys
         map_info(map_name)
-        with self.lock:
-            cmd = [sys.executable, PATROL_NODE, '--ros-args', '-p', f'map_name:={map_name}', '-p', f'fleet:={fleet_path}',
-                   '-p', f'db:={db_path}', '-p', f'config_dir:={CONFIG}']
+        with self.lock:   # 로봇 목록·설정·구역은 노드가 DB 에서 읽음
+            cmd = [sys.executable, PATROL_NODE, '--ros-args', '-p', f'map_name:={map_name}', '-p', f'db:={db_path}']
             return self._start(cmd, {'map': map_name})
 
 
@@ -453,8 +484,8 @@ class RouteRunner(_Proc):
     def __init__(self):
         super().__init__('routes.log')
 
-    def start(self, fleet_path, db_path):
+    def start(self, db_path):
         import sys
-        with self.lock:
-            cmd = [sys.executable, ROUTE_RUNNER, '--ros-args', '-p', f'fleet:={fleet_path}', '-p', f'db:={db_path}']
+        with self.lock:   # 로봇 목록은 실행기가 DB 에서 읽음
+            cmd = [sys.executable, ROUTE_RUNNER, '--ros-args', '-p', f'db:={db_path}']
             return self._start(cmd, {})

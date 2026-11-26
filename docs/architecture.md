@@ -27,7 +27,7 @@ flowchart LR
     subgraph PC["PC · pixi 환경 · pixi run web"]
         direction TB
         HTTP["serve.py :8080<br/>정적 파일 (no-cache)<br/>GET/PUT /api/fleet"]
-        CFG[("config/fleet.json<br/>로봇 목록")]
+        CFG[("data/fleet.db<br/>로봇 목록·설정·이력")]
         RB["rosbridge_websocket<br/>WebSocket :9090"]
         RA["rosapi<br/>그래프 조회 · 타입 정보"]
         NAV["Nav2 / AMCL · 로봇별 ns<br/>(선택)"]
@@ -52,7 +52,7 @@ flowchart LR
 | 구성 요소 | 위치 | 포트 | 역할 |
 | --- | --- | --- | --- |
 | `serve.py` | PC | 8080 (HTTP) | `ros2-fleet-console/web` 정적 파일 제공(캐시 끔), `/api/fleet` 로봇 목록 읽기·저장(관리자 토큰·입력 검증), `/api/control` 조종 권한(lease) |
-| `config/fleet.json` | PC | — | 등록된 로봇: id, 이름, 종류, 네임스페이스, TF 토픽, TF 접두사, 표시 색 |
+| `data/fleet.db` | PC | — | 등록된 로봇(id, 이름, 종류, 네임스페이스, TF 토픽, TF 접두사, 표시 색), 로봇 종류, 활성 지도·모드, 구역·설정, 이력 (예전 `config/fleet.json` 은 켤 때 가져옴) |
 | `rosbridge_websocket` | PC | 9090 (WS) | 브라우저 JSON ↔ ROS 2 토픽·서비스·액션 변환. 로봇이 몇 대든 하나 |
 | `rosapi` | PC | — | 노드·토픽·서비스 목록, 메시지 타입 정의, 시간 조회 (launch 에서 `respawn`) |
 | 로봇 bringup | 로봇 | — | 네임스페이스로 실행 (TurtleBot3: `robot/tb3_ns.launch.py` 또는 `namespace:=`, Pinky: `robot/pinky_ns.launch.py`) |
@@ -336,8 +336,7 @@ stateDiagram-v2
 ros2-fleet-console/
 ├── README.md
 ├── config/
-│   ├── fleet.json           로봇 목록 + 활성 지도 (setup.html·지도 화면에서 저장)
-│   ├── mode.json            운영 모드
+│   ├── *.migrated           예전 fleet.json·mode.json·zones/·patrol/ (DB 로 가져온 뒤)
 │   ├── maps/ zones/ masks/  지도 · 이동 구역 · 로봇별 keepout 마스크
 │   └── patrol/<지도>.json   경비 감지·순회 설정 (순회 간격, 대기 알림 간격)
 ├── data/alerts.db           경보 (SQLite)
@@ -450,7 +449,7 @@ sequenceDiagram
     R-->>S: ✓ / ✕ 목록, {접두사}odom → base_footprint 수신 여부
     U->>S: 목록에 추가 → 저장
     S->>H: PUT /api/fleet
-    H-->>S: 검증 후 config/fleet.json 저장 (id·ns 중복, 이름 형식 검사)
+    H-->>S: 검증 후 DB robots·fleet_settings 저장 (id·ns 중복, 이름 형식 검사)
 ```
 
 ### 플릿 화면 데이터
@@ -471,7 +470,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    P["burger.yaml (TurtleBot3)<br/>pinky.yaml (Pinky)<br/>종류는 fleet.json 에서"] --> W["nav2_ns.launch.py<br/>프레임에 접두사 · 절대 토픽 → 상대<br/>enable_stamped_cmd_vel (Pinky=false)<br/>LiDAR 안전 구역 (DB)"]
+    P["burger.yaml (TurtleBot3)<br/>pinky.yaml (Pinky)<br/>종류·반지름은 DB 에서"] --> W["nav2_ns.launch.py<br/>프레임에 접두사 · 절대 토픽 → 상대<br/>enable_stamped_cmd_vel (Pinky=false)<br/>LiDAR 안전 구역 (DB)"]
     W --> B["nav2_bringup<br/>namespace=X, use_namespace=True<br/>(/tf → X/tf remap)"]
     B --> A["X/amcl · X/map_server"]
     B --> N["X/bt_navigator · controller · planner …"]
@@ -513,7 +512,7 @@ sequenceDiagram
     U->>W: 끝내기 → POST /api/mapping/stop (SIGINT 로 그룹 종료)
     U->>W: 이동 구역: 다각형 그리기, 로봇별 적용 → 저장
     W->>S: PUT /api/zones/lab (토큰)
-    S->>S: 검증 → config/zones/lab.json, 로봇별 마스크 config/masks/lab/<ns>.pgm
+    S->>S: 검증 → DB zones·zone_points·zone_robots, 로봇별 마스크 config/masks/lab/<ns>.pgm (반지름: DB robot_types)
     U->>N: nav2_ns.launch.py map:=lab (마스크 있으면 keepout 필터 자동)
     W->>N: 구역 다시 저장 시 /tb3_01/keepout_filter_mask_server/load_map (즉시 반영)
 ```
@@ -572,7 +571,7 @@ stateDiagram-v2
     mapping --> operate: 끝내기 · 모드 칩
 ```
 
-- 모드는 `config/mode.json` (`operate` | `mapping`). 서버를 다시 켜면 운영으로 (예전 `patrol` 도 운영으로).
+- 모드는 DB `fleet_settings.mode` (`operate` | `mapping` | `obstacle`), 바뀔 때마다 `mode_changes`. 서버를 다시 켜면 운영으로.
 - 운영 모드에서 로봇마다 역할(`robot_roles`): **워커** = 이동 경로 반복(`route_runner_node`), **경비** = 자동 순회 + 감시(`patrol_node`), 없음 = 수동 조종.
 - 지도 만들기로 가면 서버가 이동 경로·경비를 모두 멈춤(paused)으로 바꾸고 실행기·경비 노드를 끕니다.
 - 경비 상태(`robot_roles.guard_state`): `stopped` → (시작) `running` ⇄ (멈춤·비상정지·모드·서버 재시작 / 재개) `paused`; `running` → (새 장애물 경보) `alarm` → (경보 처리 또는 재개) `running`.

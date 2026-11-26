@@ -1,105 +1,70 @@
-"""경비 저장소: 운영 모드, 경비 감지·순회 설정(지도별 JSON), 경보 기록(SQLite).
+"""경비 저장소: 경비 감지·순회 설정(지도마다), 경보 기록. 모두 data/fleet.db (fleet_db.py).
 
 serve.py 와 robot/patrol_node.py(경비 노드)가 함께 씁니다.
 
-  config/mode.json             {"mode": "operate"|"mapping"|"obstacle", "since": epoch, "run": 장애물 처리 번호}
-                               (예전 "patrol"(플릿 전체 경비) 은 없어짐 → 운영 모드에서 로봇마다 역할(roles.py)로)
-  config/patrol/<지도>.json    {"settings": {...}} (예전 파일의 "routes"(수동 순찰 경로)는 읽지 않음)
-  data/fleet.db (fleet_db.py)  경보: alerts (한 건), alert_robots (본 로봇마다 한 줄, robots 외래 키 → 로봇별 검색)
+  guard_settings (v4)   지도마다 경비 감지·순회 설정 (예전 config/patrol/<지도>.json — 서버를 켤 때 가져옴)
+  alerts, alert_robots  경보 (한 건), 본 로봇마다 한 줄 (robots 외래 키 → 로봇별 검색)
+운영 모드는 fleet_store.py (fleet_settings, 예전 config/mode.json).
 """
 import json
-import os
 import re
-import tempfile
 import time
 
 import fleet_db
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(APP_DIR, 'config')
-MODE_PATH = os.path.join(CONFIG, 'mode.json')
-PATROL_DIR = os.path.join(CONFIG, 'patrol')
 DB_PATH = fleet_db.DB_PATH
-
-MODES = ('operate', 'mapping', 'obstacle')   # obstacle = 장애물 처리 (서버가 자동으로만 바꿈, obstacle.py)
+MODES = fleet_db.MODES
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$')
 ID_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]{0,40}$')
 
-DEFAULT_SETTINGS = {
-    'min_area': 0.05,      # 경보로 볼 최소 크기 (m²)
-    'persist': 2,          # 연속으로 보여야 하는 스캔 수 (같은 로봇)
-    'max_range': 3.5,      # 이 거리 안의 스캔만 비교 (m)
-    'tol': 0.15,           # 기준 지도 벽에서 이 거리 안은 차이로 보지 않음 (위치 오차 여유, m)
-    'decay': 10.0,         # 이 시간(초) 동안 다시 안 보이면 증거를 지움 (지나가는 사람 등)
-    'escalate': True,      # 다른 로봇이 같은 곳을 다시 보면 등급 올리기
-    'spacing': 1.0,        # 경비 순회 지점 간격 (m): 갈 수 있는 곳을 이 간격 격자로 빠짐없이 돎 (작을수록 꼼꼼·느림)
-    'alarm_interval': 5.0, # 장애물 앞에서 기다리는 동안 소리·LED 를 반복하는 간격 (초)
-}
+# 기본값·범위는 fleet_db 에 (DB CHECK 와 같음)
+#   min_area 경보로 볼 최소 크기 (m²) · persist 연속으로 보여야 하는 스캔 수 · max_range 이 거리 안의 스캔만 비교 (m)
+#   tol 기준 지도 벽에서 이 거리 안은 차이로 보지 않음 (m) · decay 이 시간(초) 동안 안 보이면 증거를 지움
+#   escalate 다른 로봇이 같은 곳을 다시 보면 등급 올리기 · spacing 경비 순회 지점 간격 (m)
+#   alarm_interval 장애물 앞에서 기다리는 동안 소리·LED 반복 간격 (초)
+DEFAULT_SETTINGS = dict(fleet_db.GUARD_DEFAULTS)
+LIMITS = fleet_db.GUARD_LIMITS
 
 MIGRATIONS = fleet_db.MIGRATIONS
 
 
-def _atomic_json(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.tmp')
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-        f.write('\n')
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, path)
-
-
-# ------------------------------------------------------------------ 모드
-def read_mode():
-    try:
-        with open(MODE_PATH, encoding='utf-8') as f:
-            m = json.load(f)
-        if m.get('mode') in MODES:
-            return m
-        if m.get('mode') == 'patrol':   # 예전 '경비 모드' → 운영 (경비는 이제 로봇 역할)
-            return {'mode': 'operate', 'since': m.get('since', 0)}
-    except (FileNotFoundError, ValueError):
-        pass
-    return {'mode': 'operate', 'since': 0}
-
-
-def write_mode(mode, **extra):
-    if mode not in MODES:
-        raise ValueError(f'모드는 {MODES} 중 하나')
-    m = {'mode': mode, 'since': time.time(), **extra}
-    _atomic_json(MODE_PATH, m)
-    return m
-
-
-# ------------------------------------------------------------------ 순찰 경로 · 설정
-def read_patrol(map_name):
+# ------------------------------------------------------------------ 경비 감지·순회 설정 (지도마다)
+def read_patrol(con, map_name):
+    """{map, settings, updated} — 저장한 적이 없으면 기본값 (updated 0)"""
     if not NAME_RE.match(map_name or ''):
         raise ValueError('지도 이름 형식이 올바르지 않습니다')
-    try:
-        with open(os.path.join(PATROL_DIR, f'{map_name}.json'), encoding='utf-8') as f:
-            d = json.load(f)
-    except FileNotFoundError:
-        d = {}
-    saved = {k: v for k, v in d.get('settings', {}).items() if k in DEFAULT_SETTINGS}
-    return {'map': map_name, 'settings': {**DEFAULT_SETTINGS, **saved}}
+    r = con.execute('SELECT * FROM guard_settings WHERE map = ?', (map_name,)).fetchone()
+    if not r:
+        return {'map': map_name, 'settings': dict(DEFAULT_SETTINGS), 'updated': 0.0}
+    st = {k: (bool(r[k]) if isinstance(v, bool) else int(r[k]) if k == 'persist' else float(r[k])) for k, v in DEFAULT_SETTINGS.items()}
+    return {'map': map_name, 'settings': st, 'updated': r['updated_at']}
 
 
-def write_patrol(map_name, data, robot_ids=None):
+def write_patrol(con, map_name, data, robot_ids=None):
     """감지·순회 설정 저장 (data: {"settings": {...}}). robot_ids 는 예전 호출과 맞추려고 받기만 함"""
-    cur = read_patrol(map_name)
+    cur = read_patrol(con, map_name)
     s = {**cur['settings']}
     for k, v in (data.get('settings') or {}).items():
         if k not in DEFAULT_SETTINGS:
             raise ValueError(f'알 수 없는 설정: {k}')
-        s[k] = bool(v) if isinstance(DEFAULT_SETTINGS[k], bool) else float(v)
-    if not (0.01 <= s['min_area'] <= 5 and 1 <= s['persist'] <= 20 and 0.5 <= s['max_range'] <= 12
-            and 0.02 <= s['tol'] <= 1 and 1 <= s['decay'] <= 600 and 0.5 <= s['spacing'] <= 3
-            and 2 <= s['alarm_interval'] <= 60):
-        raise ValueError('설정 값이 범위를 벗어났습니다')
+        if isinstance(DEFAULT_SETTINGS[k], bool):
+            s[k] = bool(v)
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f'{k} 는 숫자여야 합니다')
+        s[k] = float(v)
+    for k, (lo, hi) in LIMITS.items():
+        if not lo <= s[k] <= hi:
+            raise ValueError(f'{k} 는 {lo} ~ {hi} 사이여야 합니다')
     s['persist'] = int(s['persist'])
-    out = {'settings': s}
-    _atomic_json(os.path.join(PATROL_DIR, f'{map_name}.json'), out)
-    return {'map': map_name, **out}
+    now = time.time()
+    cols = list(DEFAULT_SETTINGS)
+    with con:
+        con.execute('INSERT OR IGNORE INTO maps (name, created_at) VALUES (?, ?)', (map_name, now))
+        con.execute(f'INSERT INTO guard_settings (map, {", ".join(cols)}, updated_at) VALUES (?, {", ".join("?" * len(cols))}, ?) '
+                    f'ON CONFLICT(map) DO UPDATE SET {", ".join(f"{c} = excluded.{c}" for c in cols)}, updated_at = excluded.updated_at',
+                    (map_name, *[int(s[c]) if isinstance(s[c], bool) else s[c] for c in cols], now))
+    return read_patrol(con, map_name)
 
 
 # ------------------------------------------------------------------ 경보 DB
@@ -109,7 +74,7 @@ def db(path=DB_PATH):
 
 def ensure_refs(con, map_name, robot_id, now):
     """경보를 쓰기 전: 지도·로봇 참조 행이 없으면 최소한으로 만듦 (DB 가 막 새로 만들어졌어도 외래 키가 맞게).
-    이름 등은 서버의 sync_robots·sync_maps 가 나중에 채움. 트랜잭션 안에서 부름."""
+    이름 등은 서버(fleet_store·sync_maps)가 나중에 채움. 트랜잭션 안에서 부름."""
     con.execute('INSERT OR IGNORE INTO maps (name, created_at) VALUES (?, ?)', (map_name, now))
     con.execute('INSERT OR IGNORE INTO robots (id, updated_at) VALUES (?, ?)', (robot_id, now))
 

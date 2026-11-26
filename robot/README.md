@@ -282,9 +282,9 @@ Pinky 의 `bringup.py` 는 바퀴 100 RPM(약 0.28 m/s) 을 넘으면 양쪽을 
    - `motor_power`, `sensor_state`, `battery_state` 가 있으면 TurtleBot3
 3. **폼에 채우기** → 이름·표시 색 확인 (TF 토픽·접두사는 종류에 맞게 자동 입력)
 4. **연결 테스트** → 토픽·서비스·TF 프레임 확인 (✓ / ✕)
-5. **목록에 추가** → **저장** → `ros2-fleet-console/config/fleet.json` 에 기록
+5. **목록에 추가** → **저장** → DB(`data/fleet.db` 의 `robots`)에 기록
 
-`fleet.json` 을 직접 편집해도 됩니다.
+예전처럼 `config/fleet.json` 을 직접 써서 두고 웹 서버를 켜면 그 내용을 DB 로 가져옵니다 (`fleet.json.migrated` 로 이름이 바뀜).
 
 ```json
 {
@@ -388,7 +388,7 @@ pixi run ros2 launch ros2-fleet-console/robot/nav2_ns.launch.py namespace:=pinky
 | --- | --- | --- |
 | `namespace` | (필수) | 로봇 네임스페이스 (`tb3_01`) |
 | `frame_prefix` | `''` | TF 프레임 접두사. TurtleBot3 는 `tb3_01/`, Pinky 는 비움 |
-| `robot_type` | `auto` | `turtlebot3` \| `pinky`. `auto` 면 `config/fleet.json` 에서 네임스페이스로 찾음 (없으면 `turtlebot3`) |
+| `robot_type` | `auto` | `turtlebot3` \| `pinky`. `auto` 면 DB 로봇 목록에서 네임스페이스로 찾음 (없으면 `turtlebot3`). costmap `robot_radius` 는 그 종류의 DB `robot_types.nav_radius` |
 | `stamped` | `auto` | cmd_vel TwistStamped 여부. `auto` 면 TurtleBot3 `true`, Pinky `false`. `true`/`false` 로 직접 정할 수도 있음 |
 | `map` | (필수) | 지도 이름(`config/maps/<이름>.yaml`) 또는 yaml 경로 |
 | `keepout` | `auto` | 이동 구역 마스크. `auto` 면 `config/masks/<지도>/<ns>.yaml` 이 있을 때 keepout 필터를 켬, `off` 로 끔, 또는 yaml 경로 |

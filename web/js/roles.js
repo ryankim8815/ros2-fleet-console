@@ -135,6 +135,23 @@ window.App.ready.then((App) => {
     load();
   });
 
+  // 최근 역할·경비 상태 변경 (DB role_changes)
+  const VAL = { ...GUARD, worker: '워커', guard: '경비' };
+  async function loadHistory() {
+    try {
+      const h = (await (await fetch('/api/roles/history?limit=15', { cache: 'no-store' })).json()).changes || [];
+      $('#role-hist').innerHTML = h.length ? h.map((c) => {
+        const r = robots.find((x) => x.id === c.robot_id) || { name: c.robot_id, color: '#8B949E' };
+        const what = c.kind === 'role' ? '역할' : '경비';
+        return `<div style="display: flex; gap: 8px; flex-wrap: wrap"><span class="muted mono">${new Date(c.t * 1000).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+          <span><span class="swatch" style="background: ${esc(r.color)}"></span> ${esc(r.name)}</span><b>${what}</b>
+          <span>${esc(VAL[c.previous] || c.previous || '없음')} → ${esc(VAL[c.value] || c.value || '없음')}</span><span class="muted">${esc(c.message)}</span></div>`;
+      }).join('') : '<div class="empty">아직 변경이 없습니다</div>';
+    } catch (e) { /* 다음에 */ }
+  }
+  loadHistory();
+  setInterval(loadHistory, 5000);
+
   document.addEventListener('tb3:estop', () => setTimeout(load, 300));
   load();
   setInterval(load, 2000);

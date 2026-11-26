@@ -6,10 +6,10 @@
   - enable_stamped_cmd_vel 을 로봇에 맞춤 (TurtleBot3 true, Pinky false)
   - keepout: 전역·지역 costmap 에 KeepoutFilter 추가 (토픽은 /<ns>/… 절대 이름)
   - 로봇 종류별 기본 파라미터 파일: TurtleBot3 config/nav2/burger.yaml, Pinky config/nav2/pinky.yaml
-    (종류는 config/fleet.json 에서 네임스페이스로 찾음, robot_for_ns)
+    (종류는 DB robots 에서 네임스페이스로 찾음, robot_for_ns — 읽기 전용)
+  - costmap robot_radius 를 그 종류의 DB robot_types.nav_radius 로 (웹·구역·경비·장애물 처리와 같은 표)
   - safety: collision_monitor 의 LiDAR 안전 구역 LidarStop(정지)·LidarSlow(서행) 값을 DB 의 그 로봇 적용 값(로봇별 덮어쓰기 > 플릿 기본값)으로 채움
 """
-import json
 import os
 import sys
 import tempfile
@@ -18,22 +18,34 @@ import yaml
 
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..'))
 sys.path.insert(0, APP_DIR)
+import fleet_store  # noqa: E402
 from safety import read_for_ns  # noqa: E402
 
 # 로봇 종류 → 기본 Nav2 파라미터 파일 (config/nav2/). 모르는 종류는 TurtleBot3(burger)
 PARAMS_BY_TYPE = {'turtlebot3': 'burger.yaml', 'pinky': 'pinky.yaml'}
 
 
-def robot_for_ns(ns, fleet_path=os.path.join(APP_DIR, 'config', 'fleet.json')):
-    """config/fleet.json 에서 네임스페이스('tb3_01', '/pinky_01', '' …)가 같은 로봇 설정. 없거나 여러 개면 None"""
-    norm = lambda v: str(v or '').strip('/')   # noqa: E731
-    try:
-        with open(fleet_path, encoding='utf-8') as f:
-            robots = json.load(f).get('robots', [])
-    except (FileNotFoundError, ValueError):
+def robot_for_ns(ns):
+    """DB(읽기 전용)에서 네임스페이스('tb3_01', '/pinky_01', '' …)가 같은 로봇 설정. 없거나 여러 개·DB 가 없으면 None"""
+    con = fleet_store.open_ro()
+    if con is None:
         return None
-    hit = [r for r in robots if norm(r.get('ns')) == norm(ns)]
-    return hit[0] if len(hit) == 1 else None
+    try:
+        return fleet_store.robot_by_ns(con, str(ns or ''))
+    finally:
+        con.close()
+
+
+def nav_radius_for_type(robot_type):
+    """그 종류의 Nav2 costmap robot_radius (DB robot_types.nav_radius). DB 가 없으면 None (파라미터 파일 값 그대로)"""
+    con = fleet_store.open_ro()
+    if con is None:
+        return None
+    try:
+        t = fleet_store.robot_types(con).get(robot_type)
+        return t['nav_radius'] if t else None
+    finally:
+        con.close()
 
 
 def params_for_type(robot_type):
@@ -78,7 +90,7 @@ def apply_safety(data, s, changes):
                     f"enabled={s['enabled']} stop={s['stop_dist']} slow={s['slow_dist']}@{s['slow_speed']}"))
 
 
-def rewrite_params(src, prefix, stamped, keepout=False, ns='', map_frame='map', safety=None):
+def rewrite_params(src, prefix, stamped, keepout=False, ns='', map_frame='map', safety=None, nav_radius=None):
     """Return (path of a rewritten copy of the Nav2 params file, list of changes).
 
     safety: LiDAR 안전 구역 설정 dict (safety.read_for_ns()). None 이면 DB 에서 그 네임스페이스 로봇의 적용 값을 읽음 (덮어쓰기 > 플릿 기본값, 읽기 전용, 없으면 기본값)."""
@@ -113,6 +125,12 @@ def rewrite_params(src, prefix, stamped, keepout=False, ns='', map_frame='map', 
 
     walk(data, '')
     apply_safety(data, safety if safety is not None else read_for_ns(ns), changes)
+    if nav_radius:   # 로봇 종류의 Nav2 반지름 (DB robot_types) → 전역·지역 costmap
+        for cm in ('global_costmap', 'local_costmap'):
+            p = data.get(cm, {}).get(cm, {}).get('ros__parameters')
+            if p is not None and 'robot_radius' in p:
+                changes.append((f'{cm}.robot_radius', p['robot_radius'], nav_radius))
+                p['robot_radius'] = nav_radius
 
     if keepout:
         # 전역·지역 costmap 모두에 KeepoutFilter (지역 costmap 에도 넣어야 제어기가 구역 안으로 들어가지 않음)

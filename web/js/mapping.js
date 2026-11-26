@@ -26,7 +26,12 @@ window.App.ready.then(async (App) => {
   });
 
   // ---------- 1. 로봇 · 시작 자세 ----------
-  const saved = JSON.parse(App.store.get('tb3.mapStart', '{}'));
+  // 로봇별 시작 위치: DB (GET/PUT /api/mapping/starts) — 줄자로 잰 값이 다른 PC·브라우저에서도 남게
+  let saved = {};
+  try {
+    const st = await (await fetch('/api/mapping/starts', { cache: 'no-store' })).json();
+    for (const [id, v] of Object.entries(st)) saved[id] = { x: v.x, y: v.y, deg: Math.round((v.yaw * 180) / Math.PI), use: v.use };
+  } catch (e) { /* 서버 없이 열었을 때 */ }
   function renderRows() {
     const running = status.running;
     const rs = running ? status.robots : null;
@@ -53,7 +58,10 @@ window.App.ready.then(async (App) => {
       keep[row.dataset.id] = { x: v('x'), y: v('y'), deg: v('deg'), use };
       if (use) out.push({ id: row.dataset.id, x: v('x'), y: v('y'), yaw: v('deg') * Math.PI / 180 });
     });
-    App.store.set('tb3.mapStart', JSON.stringify(keep));
+    saved = keep;
+    const body = Object.fromEntries(Object.entries(keep).map(([id, v]) => [id, { x: v.x, y: v.y, yaw: (v.deg * Math.PI) / 180, use: v.use }]));
+    App.adminJson('/api/mapping/starts', { method: 'PUT', body: JSON.stringify(body) })
+      .catch((e) => toast(`시작 위치를 저장하지 못했습니다: ${e.message}`, 'warn', 5000));
     return out;
   }
 

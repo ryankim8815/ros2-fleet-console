@@ -11,7 +11,8 @@
     5. 끝      : 서버가 경보를 '처리됨'으로 하고 운영 모드로 돌아가 멈췄던 역할(이동 경로·경비)을 다시 시작
   실패·중단이면 로봇을 세우고 운영 모드로 돌아가되 역할은 멈춘 채로 둠 (관제실이 확인 후 재개). 경보도 열린 채로.
 
-DB (fleet_db.py v2): map_exits(지도마다 출구), obstacle_runs(처리 한 번마다 한 줄).
+DB (fleet_db.py): map_exits(지도마다 출구), obstacle_runs(처리 한 번마다 한 줄), obstacle_run_events(그 안에서 일어난 일),
+obstacle_settings(아래 값들, 한 줄 — 경비 화면에서 바꿈). 아래 상수는 DB 가 없을 때의 기본값입니다.
 """
 import heapq
 import json
@@ -24,7 +25,7 @@ import coverage
 import fleet_db
 import maps
 
-SIGNAL_SECONDS = 5.0       # 모여서·도착해서 소리 내는 시간 (첫 소리부터)
+SIGNAL_SECONDS = 5.0       # 모여서·도착해서 소리 내는 시간 (첫 소리부터) — 요구사항이라 설정이 아님
 STANDOFF = 0.30            # 모일 때 로봇 앞면과 장애물 표면 사이 간격 (m). 그 뒤 직접 다가가 닿음
 ROBOT_GAP = 0.06           # 나란히 선 로봇 사이 간격 (m)
 PUSH_SPEED = 0.05          # 미는 속도 (m/s)
@@ -256,15 +257,68 @@ def heading_at_start(path, look=0.5):
     return math.atan2(tgt[1] - pts[0][1], tgt[0] - pts[0][0])
 
 
-def formation(obstacle, path, robots):
+# ------------------------------------------------------------------ 설정 (DB obstacle_settings)
+SETTING_KEYS = tuple(fleet_db.OBSTACLE_DEFAULTS)
+
+
+def get_settings(con):
+    """장애물 처리 값 {standoff, robot_gap, push_speed, approach_speed, segment, exit_tol, exit_radius, max_segments,
+    gather_timeout, max_deviation}. v4 전 DB 면 기본값"""
+    try:
+        r = con.execute('SELECT * FROM obstacle_settings WHERE id = 1').fetchone()
+    except Exception:  # noqa: BLE001
+        r = None
+    if not r:
+        return dict(fleet_db.OBSTACLE_DEFAULTS)
+    return {k: (int(r[k]) if k == 'max_segments' else float(r[k])) for k in SETTING_KEYS}
+
+
+def set_settings(con, body):
+    cur = get_settings(con)
+    for k, v in (body or {}).items():
+        if k not in SETTING_KEYS:
+            raise ValueError(f'알 수 없는 설정: {k}')
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f'{k} 는 숫자여야 합니다')
+        lo, hi = fleet_db.OBSTACLE_LIMITS[k]
+        if not lo <= v <= hi:
+            raise ValueError(f'{k} 는 {lo} ~ {hi} 사이여야 합니다')
+        cur[k] = int(v) if k == 'max_segments' else round(float(v), 3)
+    with con:
+        con.execute(f'UPDATE obstacle_settings SET {", ".join(f"{k} = ?" for k in SETTING_KEYS)}, updated_at = ? WHERE id = 1',
+                    (*[cur[k] for k in SETTING_KEYS], time.time()))
+    return get_settings(con)
+
+
+def add_event(con, run_id, kind, message='', data=None):
+    """처리 안에서 일어난 일 한 줄 (단계, 구간마다 잰 위치 …)"""
+    try:
+        with con:
+            con.execute('INSERT INTO obstacle_run_events (run_id, t, kind, message, data) VALUES (?, ?, ?, ?, ?)',
+                        (run_id, time.time(), str(kind)[:30], str(message)[:300], json.dumps(data or {})))
+    except Exception:  # noqa: BLE001  (v4 전 DB)
+        pass
+
+
+def run_events(con, run_id):
+    try:
+        return [dict(r, data=json.loads(r['data'] or '{}')) for r in con.execute(
+            'SELECT * FROM obstacle_run_events WHERE run_id = ? ORDER BY t, id', (run_id,))]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def formation(obstacle, path, robots, settings=None):
     """로봇 자리: 장애물 뒤(밀 방향 반대쪽)에 나란히. 장애물 폭에 들어가는 만큼은 앞줄(미는 로봇), 나머지는 뒷줄(따라감).
-    robots: [{'id', 'type', 'pose': (x, y) 또는 None}]. 반환 {id: {'row', 'lat', 'x', 'y', 'th', 'radius'}}
-    lat = 밀 방향 기준 옆으로 떨어진 거리 (+ 왼쪽)."""
+    robots: [{'id', 'type', 'radius'(몸체, DB robot_types), 'pose': (x, y) 또는 None}].
+    반환 {id: {'row', 'lat', 'x', 'y', 'th', 'radius'}}. lat = 밀 방향 기준 옆으로 떨어진 거리 (+ 왼쪽)."""
+    S = settings or fleet_db.OBSTACLE_DEFAULTS
+    rad = lambda r: r.get('radius') or maps.ROBOT_RADIUS.get(r.get('type'), 0.105)   # noqa: E731
     th = heading_at_start(path)
     dx, dy = math.cos(th), math.sin(th)
     nx, ny = -dy, dx
-    rr = max(maps.ROBOT_RADIUS.get(r.get('type'), 0.105) for r in robots)
-    pitch = 2 * rr + ROBOT_GAP
+    rr = max(rad(r) for r in robots)
+    pitch = 2 * rr + S['robot_gap']
     ro = obstacle['r']
     # 앞줄: 장애물 폭에 들어가는 만큼 (양 끝 로봇은 몸체의 40% 까지 장애물 밖으로 나와도 됨)
     n_front = max(1, min(len(robots), int((2 * ro + pitch * 0.6) / pitch)))
@@ -276,13 +330,13 @@ def formation(obstacle, path, robots):
     out = {}
     free = list(robots)
     for row, lat in slots:   # 자리마다 가장 가까운 로봇 (모르면 순서대로)
-        back = ro + rr + STANDOFF if row == 'front' else ro + rr + STANDOFF + pitch + 0.10
+        back = ro + rr + S['standoff'] if row == 'front' else ro + rr + S['standoff'] + pitch + 0.10
         sx = obstacle['x'] - dx * back + nx * lat
         sy = obstacle['y'] - dy * back + ny * lat
         pick = min(free, key=lambda r: (r['pose'][0] - sx) ** 2 + (r['pose'][1] - sy) ** 2 if r.get('pose') else 1e9)
         free.remove(pick)
         out[pick['id']] = {'row': row, 'lat': round(lat, 3), 'x': round(sx, 3), 'y': round(sy, 3), 'th': round(th, 4),
-                           'radius': maps.ROBOT_RADIUS.get(pick.get('type'), 0.105), 'back': round(back, 3)}
+                           'radius': rad(pick), 'back': round(back, 3)}
     return out
 
 

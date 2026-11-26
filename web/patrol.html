@@ -83,6 +83,12 @@
         <label class="muted" style="font-size: 13px; display: flex; gap: 6px; align-items: center"><input type="checkbox" data-s="escalate"> 다른 로봇이 같은 곳을 다시 보면 등급 올리기</label>
       </section>
       <button class="btn btn-primary" id="routes-save" style="min-height: 44px" disabled>저장 (경비 중이면 5초 안에 반영)</button>
+      <section class="panel" aria-labelledby="ob-title">
+        <h2 id="ob-title">장애물 처리 값</h2>
+        <div class="muted" style="font-size: 12px">모든 지도 공통. 다음 장애물 처리부터 반영됩니다 (모여서·도착해서 소리 5초는 고정).</div>
+        <div class="col" style="gap: 6px" id="ob-fields"></div>
+        <button class="btn" id="ob-save" disabled>장애물 처리 값 저장</button>
+      </section>
     </aside>
 
     <!-- 가운데: 지도 -->

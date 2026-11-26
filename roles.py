@@ -11,6 +11,7 @@
   running  경비 중                         ← 시작·재개 / 노드: 대기 중이던 경보가 처리되면
   paused   멈춤 (이어서 가능)               ← 멈춤, 전체 비상정지, 지도 만들기 모드, 서버 재시작
   alarm    장애물 앞에서 대기 (alarm_alert_id) ← 노드: 경비 중에 새 장애물 경보를 만들었을 때
+바뀔 때마다 role_changes 에 한 줄 (역할: kind 'role', 경비 상태: kind 'guard') — fleet_db v4.
 """
 import time
 
@@ -19,6 +20,27 @@ import fleet_db
 ROLES = fleet_db.ROLES
 GUARD_STATES = fleet_db.GUARD_STATES
 ROLE_LABEL = {'worker': '워커', 'guard': '경비', None: '역할 없음'}
+
+
+def _log(con, robot_id, kind, previous, value, message=''):
+    """이력 한 줄 (트랜잭션 안에서). v4 전 DB 면 건너뜀"""
+    try:
+        con.execute('INSERT INTO role_changes (t, robot_id, kind, previous, value, message) VALUES (?, ?, ?, ?, ?, ?)',
+                    (time.time(), robot_id, kind, previous, value, str(message)[:200]))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def history(con, robot_id=None, limit=30):
+    """최근 역할·경비 상태 변경 [{t, robot_id, kind, previous, value, message}]"""
+    q, args = 'SELECT * FROM role_changes', []
+    if robot_id:
+        q += ' WHERE robot_id = ?'
+        args.append(robot_id)
+    try:
+        return [dict(r) for r in con.execute(q + ' ORDER BY t DESC, id DESC LIMIT ?', (*args, max(1, min(int(limit), 200))))]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _row(r):
@@ -60,9 +82,14 @@ def set_role(con, robot_id, role):
     _check_robot(con, robot_id)
     if role not in (None, *ROLES):
         raise ValueError('역할은 worker | guard | null')
-    prev = role_of(con, robot_id)
+    before = get_role(con, robot_id)
+    prev = before['role'] if before else None
     now = time.time()
     with con:
+        if prev != role:
+            _log(con, robot_id, 'role', prev, role, '역할 지정')
+            if before and before['role'] == 'guard' and before['guard_state'] != 'stopped':
+                _log(con, robot_id, 'guard', before['guard_state'], 'stopped', '역할을 바꿔 경비 정지')
         if role is None:
             con.execute('DELETE FROM robot_roles WHERE robot_id = ?', (robot_id,))
         elif prev != role:
@@ -86,6 +113,8 @@ def guard_control(con, robot_id, action, message=''):
         raise ValueError('멈춤이나 장애물 대기 중일 때만 재개할 수 있습니다')
     msg = message or {'start': '시작', 'resume': '재개', 'pause': '사용자 멈춤', 'stop': '정지'}[action]
     with con:
+        if r['guard_state'] != target:
+            _log(con, robot_id, 'guard', r['guard_state'], target, msg)
         con.execute('UPDATE robot_roles SET guard_state = ?, alarm_alert_id = NULL, message = ?, updated_at = ? WHERE robot_id = ?',
                     (target, msg[:200], time.time(), robot_id))
     return get_role(con, robot_id)
@@ -94,6 +123,8 @@ def guard_control(con, robot_id, action, message=''):
 def pause_all_guards(con, message):
     """경비 중·대기 중인 경비를 모두 멈춤 (비상정지·지도 만들기 모드·서버 재시작). 반환: 멈춘 수"""
     with con:
+        for r in con.execute("SELECT robot_id, guard_state FROM robot_roles WHERE guard_state IN ('running', 'alarm')").fetchall():
+            _log(con, r['robot_id'], 'guard', r['guard_state'], 'paused', message)
         return con.execute("UPDATE robot_roles SET guard_state = 'paused', alarm_alert_id = NULL, message = ?, updated_at = ? "
                            "WHERE guard_state IN ('running', 'alarm')", (message[:200], time.time())).rowcount
 
@@ -113,6 +144,8 @@ def set_alarm(con, robot_id, alert_id, message):
     with con:
         n = con.execute("UPDATE robot_roles SET guard_state = 'alarm', alarm_alert_id = ?, message = ?, updated_at = ? "
                         "WHERE robot_id = ? AND guard_state = 'running'", (alert_id, message[:200], time.time(), robot_id)).rowcount
+        if n:
+            _log(con, robot_id, 'guard', 'running', 'alarm', message)
     return n > 0
 
 
@@ -121,4 +154,6 @@ def clear_alarm(con, robot_id, message):
     with con:
         n = con.execute("UPDATE robot_roles SET guard_state = 'running', alarm_alert_id = NULL, message = ?, updated_at = ? "
                         "WHERE robot_id = ? AND guard_state = 'alarm'", (message[:200], time.time(), robot_id)).rowcount
+        if n:
+            _log(con, robot_id, 'guard', 'alarm', 'running', message)
     return n > 0

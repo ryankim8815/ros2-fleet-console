@@ -10,6 +10,8 @@
 (function () {
   'use strict';
 
+  // 로봇 종류별 프로필. limits·radius·lowVoltage·voltageRange·label 은 서버 DB(robot_types) 값으로 덮어씀 (common.js loadFleet).
+  // 여기 값은 서버 없이 열었을 때의 기본값
   const Profiles = {
     turtlebot3: {
       label: 'TurtleBot3',

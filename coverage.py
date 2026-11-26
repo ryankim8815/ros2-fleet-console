@@ -46,7 +46,7 @@ def disk_dilate(mask, r_cells):
 
 
 def forbidden_grid(info, zones, robot_id):
-    """그 로봇에게 금지인 칸 (bool, 행 0 = 아래). zones: maps.read_zones()['zones']"""
+    """그 로봇에게 금지인 칸 (bool, 행 0 = 아래). zones: maps.read_zones(con, 지도)['zones'] (DB)"""
     w, h = info['width'], info['height']
     mine = [z for z in zones if '*' in z['robots'] or robot_id in z['robots']]
     if not mine:
@@ -163,17 +163,18 @@ def snake_order(points, spacing):
 
 
 def plan(map_name, guards, spacing, zones=None):
-    """guards: [{'id', 'type', 'pose': (x, y) 또는 None}, ...] (순서 고정). 반환 {robot_id: [[x, y], ...]}
+    """guards: [{'id', 'type', 'radius', 'pose': (x, y) 또는 None}, ...] (순서 고정), zones: 그 지도의 구역 (DB).
+    반환 {robot_id: [[x, y], ...]}
 
     로봇마다 갈 수 있는 곳이 다를 수 있어(크기·이동 구역) 로봇마다 계산하고, 모두의 지점을 합쳐 지그재그로 줄 세운 뒤
     로봇 수만큼 이어진 덩어리로 나눔. 덩어리의 점을 그 로봇이 못 가면 갈 수 있는 로봇에게 넘김."""
     if not guards:
         return {}
     info, occ, free = load_grid(map_name)
-    zones = zones if zones is not None else maps.read_zones(map_name).get('zones', [])
+    zones = zones or []   # 부르는 쪽이 DB 에서 읽어 넘김 (maps.read_zones)
     ok = {}
     for g in guards:
-        radius = maps.ROBOT_RADIUS.get(g.get('type'), 0.105)
+        radius = g.get('radius') or maps.ROBOT_RADIUS.get(g.get('type'), 0.105)   # DB robot_types 몸체 반지름
         ok[g['id']] = reachable(info, occ, free, radius, forbidden_grid(info, zones, g['id']), g.get('pose'))
     union = np.zeros_like(next(iter(ok.values())))
     for m in ok.values():

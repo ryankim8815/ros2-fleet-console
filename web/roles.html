@@ -55,6 +55,11 @@
       <div id="role-list"><div class="empty" style="padding: 16px">불러오는 중…</div></div>
     </section>
 
+    <section class="panel" aria-labelledby="hist-title">
+      <div class="panel-head"><h2 id="hist-title">최근 변경</h2><span class="muted" style="font-size: 12px">역할·경비 상태가 바뀔 때마다 (DB role_changes)</span></div>
+      <div class="col" style="gap: 3px; font-size: 12px" id="role-hist"><div class="empty">불러오는 중…</div></div>
+    </section>
+
     <section class="role-help">
       <div class="tile"><b>워커</b><span class="muted">이동 경로 화면에서 할당한 경로를 정해진 횟수(0 = 계속)만큼 반복합니다. 경로 할당·반복 횟수는 <a href="routes.html">이동 경로</a>에서.</span></div>
       <div class="tile"><b>경비</b><span class="muted">기준 지도에서 갈 수 있는 곳을 빠짐없이 도는 지점을 스스로 만들어 반복합니다(경비 로봇이 여럿이면 구역을 나눔). 지도에 없던 장애물을 찾으면 그 자리에 멈춰 소리(TurtleBot3 부저, Pinky LED·표정)와 이 화면의 경고음으로 알리고, <a href="patrol.html">경비</a> 화면에서 그 경보를 처리하거나 여기서 <b>재개</b>할 때까지 기다립니다.</span></div>

@@ -31,7 +31,7 @@ from launch_ros.actions import Node, PushROSNamespace
 HERE = os.path.dirname(os.path.realpath(__file__))
 APP_DIR = os.path.abspath(os.path.join(HERE, '..'))
 sys.path.insert(0, HERE)
-from nav2_params import params_for_type, rewrite_params, stamped_for_type  # noqa: E402
+from nav2_params import nav_radius_for_type, params_for_type, rewrite_params, stamped_for_type  # noqa: E402
 
 
 def launch_setup(context):
@@ -54,7 +54,8 @@ def launch_setup(context):
             continue
         # 파라미터 파일: auto 면 로봇 종류별 (TurtleBot3 burger.yaml, Pinky pinky.yaml)
         src = params_for_type(r.get('type')) if nav2_params in ('', 'auto') else nav2_params
-        params, _ = rewrite_params(src, prefix, stamped_for_type(r.get('type')), False, ns, map_frame=slam_frame)
+        params, _ = rewrite_params(src, prefix, stamped_for_type(r.get('type')), False, ns, map_frame=slam_frame,
+                                   nav_radius=nav_radius_for_type(r.get('type')))
         # navigation_launch.py 는 네임스페이스를 직접 씌우지 않으므로(bringup_launch 가 하던 일) 여기서 PushROSNamespace
         nav = GroupAction([PushROSNamespace(ns), IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(get_package_share_directory('nav2_bringup'), 'launch', 'navigation_launch.py')),

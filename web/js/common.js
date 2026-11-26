@@ -120,6 +120,12 @@
       fleet = FALLBACK;
       toast('로봇 목록(/api/fleet)을 읽지 못해 기본 로봇 1대로 동작합니다', 'warn', 5000);
     }
+    // 로봇 종류 프로필은 DB(robot_types) 값으로 덮어씀: 최대 속도, 몸체 반지름, 배터리 전압 (로봇 등록 화면에서 바꿈)
+    for (const [t, v] of Object.entries(fleet.types || {})) {
+      const p = (window.Profiles[t] ||= { ...window.Profiles.turtlebot3 });
+      Object.assign(p, { label: v.label, limits: { lin: v.max_lin, ang: v.max_ang }, radius: v.radius,
+        lowVoltage: v.low_voltage, voltageRange: [v.volt_min, v.volt_max] });
+    }
     robots = fleet.robots.map((cfg) => new window.Robot(ros, cfg));
     const want = new URLSearchParams(location.search).get('robot') || store.get('tb3.robot', '');
     robot = robots.find((r) => r.id === want) || robots[0];
@@ -711,6 +717,8 @@
     const nWorker = roleRows.filter((r) => r.role === 'worker').length;
     const nGuard = roleRows.filter((r) => r.role === 'guard').length;
     const online = robots.filter((r) => r.online).length;
+    let modeHist = [];
+    try { modeHist = (await (await fetch('/api/mode/history?limit=6', { cache: 'no-store' })).json()).changes || []; } catch (e) { /* ignore */ }
     const chk = (ok, text, sub) => `<div class="check"><span class="${ok ? 'ok' : 'unk'}">${ok ? '✓' : '!'}</span><span>${esc(text)}${sub ? `<span class="muted" style="display: block; font-size: 11px">${esc(sub)}</span>` : ''}</span><span></span></div>`;
     const cur = modeState.mode;
     if (cur === 'obstacle') {   // 장애물 처리 중에는 모드를 바꿀 수 없음 (배너의 중단으로)
@@ -733,6 +741,9 @@
       <div style="display: flex; gap: 8px"><button value="cancel" class="btn" style="flex: 1 1 0; min-height: 44px">취소</button>
         <button value="ok" class="btn btn-primary" id="mode-ok" style="flex: 2 1 0; min-height: 44px">바꾸기</button></div>
       <div class="muted" style="font-size: 11px; text-align: center">지도 만들기로 바꾸면 이동 경로·경비는 멈춤 상태가 되고, 역할 화면에서 이어서·재개할 수 있습니다</div>
+      ${modeHist.length ? `<details style="font-size: 12px"><summary class="muted" style="cursor: pointer">최근 모드 변경</summary>
+        <div class="col" style="gap: 2px; margin-top: 6px">${modeHist.map((c) => `<div><span class="muted mono">${esc(new Date(c.t * 1000).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</span>
+          ${esc(MODE_LABEL[c.previous] || c.previous || '—')} → <b>${esc(MODE_LABEL[c.mode] || c.mode)}</b> <span class="muted">${esc(c.reason || '')}</span></div>`).join('')}</div></details>` : ''}
     </form>`;
     dlg.showModal();
     dlg.onclose = async () => {

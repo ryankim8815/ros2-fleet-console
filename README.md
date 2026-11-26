@@ -78,7 +78,7 @@ conda create -y -p .robostack/jazzy -c robostack-jazzy -c conda-forge python=3.1
 | 역할 없음 | 스스로 움직이지 않음. 대시보드·모바일에서 수동 조종 | — |
 
 - 역할은 `data/fleet.db` 의 `robot_roles` 에 저장됩니다. 역할을 바꾸면 하던 일은 멈춥니다 (워커 → 경로 멈춤, 경비 → 경비 정지).
-- 예전의 플릿 전체 '경비 모드'와 사람이 찍던 순찰 경로는 없어졌습니다 (경비 역할로 대체). 예전 `config/mode.json` 이 경비 모드였으면 서버가 운영으로 바꿉니다.
+- 예전의 플릿 전체 '경비 모드'와 사람이 찍던 순찰 경로는 없어졌습니다 (경비 역할로 대체). 모드는 DB(`fleet_settings`)에 있고 바뀔 때마다 `mode_changes` 에 남습니다 (모드 바꾸기 대화상자의 **최근 모드 변경**).
 
 ### 처음 시작: 지도 만들기 → 이동 구역 → 로봇별 Nav2 → 역할
 
@@ -133,8 +133,9 @@ flowchart LR
 1. **네임스페이스 자동 검색** → 토픽 목록에서 `<ns>/odom` 을 찾아 종류(TurtleBot3/Pinky)를 추정합니다.
 2. **폼에 채우기** → 이름·색 확인 → **연결 테스트**(토픽·서비스·TF 프레임 확인) → **목록에 추가** → **저장**.
 
-저장하면 `ros2-fleet-console/config/fleet.json` 에 기록됩니다. 직접 편집해도 됩니다.
-`config/` 의 현장별 파일(`fleet.json`, `mode.json`, `maps/`, `zones/`, `masks/`, `patrol/`)과 `admin_token` 은 PC 마다 달라 저장소에 넣지 않습니다 (`.gitignore`). 새로 받은 저장소에서는 로봇 등록부터 하면 됩니다. 저장소에 들어 있는 `config/` 파일은 Nav2 파라미터 `config/nav2/burger.yaml`·`pinky.yaml` 둘뿐입니다.
+저장하면 DB(`data/fleet.db` 의 `robots`·`fleet_settings`)에 기록됩니다. 예전처럼 `config/fleet.json` 을 직접 써서 두고 서버를 켜면 그 내용을 DB 로 가져옵니다 (가져온 파일은 `fleet.json.migrated` 로 이름이 바뀜).
+같은 화면의 **로봇 종류 값**에서 종류별 최대 속도, 몸체 반지름(구역 판정·마스크·경비 순회·장애물 대형), Nav2 반지름(costmap), 배터리 전압을 바꿉니다 (DB `robot_types`).
+`config/` 의 현장별 파일(`maps/`, `masks/`, 예전 형식의 `fleet.json`·`mode.json`·`zones/`·`patrol/`)과 `admin_token` 은 PC 마다 달라 저장소에 넣지 않습니다 (`.gitignore`). 새로 받은 저장소에서는 로봇 등록부터 하면 됩니다. 저장소에 들어 있는 `config/` 파일은 Nav2 파라미터 `config/nav2/burger.yaml`·`pinky.yaml` 둘뿐입니다.
 저장에는 **관리자 토큰**이 필요합니다. 처음 저장할 때 묻고 그 브라우저에 기억합니다. 토큰은 처음 실행할 때 `ros2-fleet-console/config/admin_token` 에 만들어지고(권한 600), `cat ~/turtlebot3/ros2-fleet-console/config/admin_token` 으로 확인합니다. 환경 변수 `TB3_WEB_TOKEN` 으로 정할 수도 있습니다.
 
 ## 페이지
@@ -199,7 +200,7 @@ flowchart LR
 - 실행: 서버가 `robot/route_runner_node.py` 를 띄워, 실행 중인 로봇마다 Nav2 `<ns>/follow_waypoints` 로 **한 바퀴씩** 보냅니다 (지점의 방향 yaw 포함). 진행(바퀴 수·지점 순번)은 DB 에 기록됩니다. 로그: `logs/routes.log`.
 - 실행 중에 경로를 고치면 진행 중인 goal 을 취소하고 바뀐 경로로 이어서 갑니다. 반복 횟수는 실행 중에도 바꿀 수 있고, 할당 경로를 바꾸거나 할당을 해제하려면 먼저 멈춤·정지합니다.
 - **시작**할 때마다 새 실행(run)이 만들어지고, 끝나지 않은 이전 실행은 "새로 시작해서 닫음"으로 정지됩니다. 로봇 줄의 **이력**에서 최근 실행 5개와 그 안의 일(시작·멈춤·이어서·바퀴 완료·실패·경로 수정)을 봅니다. 경로를 지워도 실행 이력은 경로 이름과 함께 남습니다.
-- 로봇 목록(fleet.json)에서 빠진 로봇의 할당은 "로봇 목록에서 빠짐"으로 아래에 보이고, 정지·해제만 됩니다.
+- 로봇 목록에서 빠진 로봇의 할당은 "로봇 목록에서 빠짐"으로 아래에 보이고, 정지·해제만 됩니다.
 - 시작·이어서는 **워커 역할**인 로봇이고, **운영 모드**이며 경로의 지도가 **활성 지도**일 때만 됩니다 (워커가 아니면 할당 줄에 "워커 아님"). 로봇마다 Nav2 가 떠 있고 초기 위치가 잡혀 있어야 합니다.
 - 지도 만들기 모드로 바꾸거나 워커 역할을 그만두면 이동 경로는 멈춥니다.
 - 저장: `data/fleet.db` 의 `routes`, `route_points`, `route_assignments`(로봇·경로·`repeat_count`), `route_runs`(실행마다 상태·진행), `route_run_events`(이력). 아래 [데이터베이스](#데이터베이스-sqlite).
@@ -318,15 +319,36 @@ flowchart LR
 
 모든 데이터는 **`data/fleet.db` 파일 하나**에 있습니다. 스키마는 [fleet_db.py](fleet_db.py) 에 있고, 읽고 쓰는 함수는 `places.py`(지점·경로·할당), `patrol_store.py`(경보), `safety.py`(LiDAR 안전 구역), `roles.py`(역할·경비 상태)에 있습니다. 서버·경로 실행기·경비 노드가 같은 파일을 함께 쓰며, WAL 모드라 읽기는 쓰기를 기다리지 않습니다.
 
-**DB 파일은 저장소에 없습니다** (`data/` 는 `.gitignore`). 서버(`pixi run web`)를 켤 때 `data/fleet.db` 가 없으면 빈 DB 를 새로 만들고(로그: `DB 파일이 없어 새로 만듭니다`), 로봇 목록(`config/fleet.json`)과 저장된 지도(`config/maps`)로 `robots`·`maps` 를 채웁니다.
+**DB 파일은 저장소에 없습니다** (`data/` 는 `.gitignore`). 서버(`pixi run web`)를 켤 때 `data/fleet.db` 가 없으면 빈 DB 를 새로 만들고(로그: `DB 파일이 없어 새로 만듭니다`), 저장된 지도(`config/maps`)로 `maps` 를 채웁니다.
 
-- 처음부터 다시 시작하려면 서버를 끄고 `data/` 의 DB 파일(`*.db`, `*.db-wal`, `*.db-shm`, `*.bak-v*`)을 지운 뒤 다시 켭니다.
+**로봇 목록·설정도 DB 가 원본입니다** (v4 부터). 예전 파일이 `config/` 에 있으면 서버를 켤 때 한 번 가져오고 `<파일>.migrated` 로 이름을 바꿉니다 (지우지 않음, 로그·이벤트에 남김):
+
+| 예전 파일 | DB |
+| --- | --- |
+| `config/fleet.json` (로봇 목록, 활성 지도, 공유 지도 토픽) | `robots`(TF 토픽·접두사·색·순서 포함), `fleet_settings` |
+| `config/mode.json` (운영 모드) | `fleet_settings.mode` + `mode_changes` (내용은 쓰지 않음: 서버를 켜면 운영으로 시작) |
+| `config/zones/<지도>.json` (이동 구역) | `zones`, `zone_points`, `zone_robots` (등록 안 된 로봇은 빼고 가져옴) |
+| `config/patrol/<지도>.json` (경비 감지·순회 설정) | `guard_settings` |
+| 브라우저 저장소 `tb3.mapStart` (지도 만들기 시작 위치) | `mapping_starts` (가져오지 않음, 다음 저장 때부터) |
+
+- 같은 이름의 파일을 다시 두고 서버를 켜면 다시 가져옵니다 (예: `fleet.json` 을 손으로 고쳐 넣기). Nav2 launch·경로 실행기·경비·장애물 처리 노드는 DB 를 읽기만 합니다.
+- **DB 를 지우면 로봇 목록·구역·설정도 사라집니다.** 처음부터 다시 시작하려면 서버를 끄고 `data/` 의 DB 파일(`*.db`, `*.db-wal`, `*.db-shm`, `*.bak-v*`)을 지운 뒤 다시 켜고, 로봇을 다시 등록하거나 `config/fleet.json` 을 두세요. 지우기 전에 `data/fleet.db` 를 복사해 두면 되돌릴 수 있습니다.
 - 서버가 켜진 채 지워도 다음 요청 때 새 파일을 만들어 다시 연결합니다. 경로 실행기는 실행 중이던 경로의 goal 을 취소하고, 경비 노드도 새 파일에 씁니다. (지워진 파일에 계속 써서 데이터가 사라지는 일이 없게, 연결한 파일의 inode 를 확인합니다.)
 
 | 구분 | 테이블 | 내용 |
 | --- | --- | --- |
 | 참조 | `maps` | 지도 이름. 지도 저장·서버 시작 때 `config/maps` 에서 등록 |
-| | `robots` | 로봇. 로봇 목록 저장·서버 시작 때 `config/fleet.json` 과 맞춤. 목록에서 빠지면 지우지 않고 `active = 0` (이력 보존) |
+| | `robots` | 로봇 (이름, 종류, 네임스페이스, TF 토픽·접두사, 색, 순서). 로봇 등록 화면이 씀. 목록에서 빠지면 지우지 않고 `active = 0` (이력 보존) |
+| 설정 | `fleet_settings` | 플릿 전체 한 줄: 공유 지도 토픽, 활성 지도(→ `maps`), 운영 모드·바뀐 시각, 장애물 처리 중이면 그 처리 |
+| | `robot_types` | 로봇 종류 프로필: 최대 속도, 몸체 반지름, Nav2 반지름, 저전압·전압 범위 (웹·마스크·경비 순회·장애물 처리·Nav2 가 함께 씀) |
+| | `zones`, `zone_points`, `zone_robots` | 지도마다 이동 구역, 꼭짓점 순서, 적용 로봇 (`all_robots = 1` 이면 모든 로봇) |
+| | `guard_settings` | 지도마다 경비 감지·순회 설정 (`min_area`, `persist`, `max_range`, `tol`, `decay`, `escalate`, `spacing`, `alarm_interval`) |
+| | `obstacle_settings` | 장애물 처리 값 (모일 간격, 로봇 사이, 미는·다가가는 속도, 구간 길이, 도착 허용, 출구 둘레, 최대 구간, 모이기 한도, 벗어남 한도). 한 줄 |
+| | `mapping_starts` | 함께 지도 만들기의 로봇별 시작 위치·참여 여부 |
+| 이력 | `mode_changes` | 모드가 바뀔 때마다 (이전 → 다음, 이유, 장애물 처리 번호) |
+| | `role_changes` | 역할·경비 상태가 바뀔 때마다 (역할 지정, 시작·멈춤·재개·정지, 장애물 대기, 비상정지 …) |
+| | `events` | 운영 이벤트 (서버 시작, 파일 가져오기, 모드, 프로세스 재시작, 장애물 처리 시작·끝, 로봇 종류 값 변경). 플릿 화면 이벤트 목록에 함께 보임 |
+| | `obstacle_run_events` | 장애물 처리 안에서 일어난 일 (단계, 처음·구간마다 잰 장애물 위치) |
 | 지점·경로 | `places` | 지점 (`map` → `maps`) |
 | | `routes` | 이동 경로 (`map` → `maps`) |
 | | `route_points` | 경로의 지점 순서. `(route_id, map)` → `routes`, `(place_id, map)` → `places` 복합 외래 키로 **다른 지도의 지점은 DB 가 거부** |
@@ -344,7 +366,7 @@ flowchart LR
 
 - **값 검사**: 좌표 범위, 방향(−π..π), 이름 길이, 반복 횟수(0~10000), 실행·경보의 상태 값, LiDAR 안전 구역 값 범위(서행 거리 ≥ 정지 거리 + 5 cm 포함)는 CHECK 제약으로 DB 가 직접 막습니다. `sqlite3` 로 직접 고쳐도 깨지지 않습니다. "같은 지점을 연달아 넣지 않기"만 앱에서 검사합니다.
 - **지우기 규칙**: 경로에서 쓰는 지점, 로봇에 할당된 경로는 지울 수 없습니다. 경로를 지우면 실행 이력의 `route_id` 는 비고 `route_name` 은 남습니다. 할당을 해제해도 실행 이력은 남습니다.
-- **스키마 버전**: `PRAGMA user_version` 으로 관리합니다 (지금 3: v2 에서 `safety_settings`·`robot_safety`·`safety_changes`·`robot_roles`, v3 에서 `map_exits`·`obstacle_runs` 추가). 나중에 스키마를 바꿀 때는 `fleet_db.py` 의 `MIGRATIONS` 끝에 함수를 하나 더합니다. 서버를 켤 때 낮은 버전이면 순서대로 바꾸고, 바꾸기 전에 `data/fleet.db.bak-v<이전 버전>` 으로 백업하며, 실패하면 그 단계 전체를 되돌리고 서버가 멈춥니다 (DB 는 이전 그대로).
+- **스키마 버전**: `PRAGMA user_version` 으로 관리합니다 (지금 4: v2 에서 `safety_settings`·`robot_safety`·`safety_changes`·`robot_roles`, v3 에서 `map_exits`·`obstacle_runs`, v4 에서 설정·이력 표와 `robots` 의 TF·색·순서 추가). 나중에 스키마를 바꿀 때는 `fleet_db.py` 의 `MIGRATIONS` 끝에 함수를 하나 더합니다. 서버를 켤 때 낮은 버전이면 순서대로 바꾸고, 바꾸기 전에 `data/fleet.db.bak-v<이전 버전>` 으로 백업하며, 실패하면 그 단계 전체를 되돌리고 서버가 멈춥니다 (DB 는 이전 그대로).
 - 예전에 쓰던 `data/places.db`·`data/alerts.db` 는 더 이상 쓰지 않습니다 (옮기지 않음). 남아 있으면 서버가 시작할 때 알려 주며, 지워도 됩니다.
 
 ```bash
@@ -357,16 +379,14 @@ sqlite3 ros2-fleet-console/data/fleet.db "SELECT datetime(t, 'unixepoch', 'local
 
 ```
 ros2-fleet-console/
-  config/fleet.json      로봇 목록, 활성 지도(mapFile) (setup.html·지도 화면에서 저장)
   config/admin_token     관리자 토큰 (처음 실행 때 생성, 600)
   config/nav2/burger.yaml   TurtleBot3 Nav2 파라미터 (실제 TurtleBot3 에서 찾은 collision_monitor 수정, LiDAR 안전 구역 포함)
   config/nav2/pinky.yaml    Pinky Pro Nav2 파라미터 (burger.yaml 에서 로봇 크기·최대 속도·cmd_vel 타입만 다름)
   config/maps/<이름>.yaml|pgm      저장한 지도 (지도 작성)
-  config/zones/<이름>.json         그 지도의 이동 구역
   config/masks/<이름>/<ns>.yaml|pgm 로봇별 keepout 마스크 (구역 저장 때 생성)
-  config/mode.json       현재 운영 모드 (운영 / 지도 만들기)
-  config/patrol/<이름>.json        그 지도의 경비 감지·순회 설정 (순회 지점 간격, 장애물 대기 알림 간격 등)
-  data/fleet.db          SQLite DB 하나: 지도·로봇 참조, 지점, 이동 경로, 할당, 실행 이력, 경보, LiDAR 안전 구역 (서버를 켤 때 없으면 생성)
+  config/*.migrated      예전 파일(fleet.json, mode.json, zones/, patrol/)을 DB 로 가져온 뒤 바꾼 이름
+  data/fleet.db          SQLite DB 하나: 로봇·종류·플릿 설정·모드, 이동 구역, 경비·장애물 처리 설정, 지점, 이동 경로, 할당,
+                         실행 이력, 경보, LiDAR 안전 구역, 역할, 출구, 이력·이벤트 (서버를 켤 때 없으면 생성)
   data/fleet.db.bak-v<n> 스키마를 올리기 전 자동 백업
   logs/mapping.log, logs/patrol.log, logs/routes.log, logs/obstacle.log  지도 만들기·경비·이동 경로·장애물 처리 프로세스 로그
   launch/web.launch.py   rosbridge(+rosapi) 와 serve.py 실행 (bind 인자)
@@ -378,6 +398,7 @@ ros2-fleet-console/
   roles.py               로봇 역할(워커·경비)과 경비 상태 (DB, serve.py 와 경비 노드가 씀)
   obstacle.py            장애물 처리: 출구, 처리 기록(DB), 장애물을 출구까지 밀 길(A*)·로봇 대형·LiDAR 원 맞춤
   coverage.py            경비 순회 지점 자동 생성 (기준 지도·로봇 크기·이동 구역 → 빠짐없이 도는 지그재그 지점, 여러 대면 나눔)
+  fleet_store.py         로봇 목록·종류·플릿 설정·모드·운영 이벤트·지도 만들기 시작 위치 (DB), 예전 파일 가져오기
   safety.py              LiDAR 안전 구역 설정 읽기·검증·저장·변경 이력 (DB, serve.py 와 robot/nav2_params.py 가 씀)
   places.py              지점·경로·할당·실행 이력 (검증, CRUD, 로봇·지도 동기화, 실행기용 진행 기록)
   robot/tb3_ns.launch.py    TurtleBot3 네임스페이스 + TF 분리 래퍼 (로봇에서 실행)

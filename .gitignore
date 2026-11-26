@@ -5,6 +5,8 @@ config/mode.json
 # 현장(PC)마다 다른 설정·데이터: 로봇 목록, 저장한 지도, 이동 구역, keepout 마스크, 순찰 경로
 # (fleet.json 이 없으면 서버는 빈 로봇 목록으로 시작하고, 로봇 등록 화면에서 저장하면 새로 생김)
 config/fleet.json
+config/*.migrated
+config/*.migrated-*
 config/maps/
 config/zones/
 config/masks/
